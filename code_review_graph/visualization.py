@@ -337,7 +337,7 @@ statsBar.innerHTML = si("Nodes", stats.total_nodes) + si("Edges", stats.total_ed
 
 // -- Tooltip --
 const tooltip = document.getElementById("tooltip");
-function escH(s) { return !s ? "" : s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+function escH(s) { return !s ? "" : s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;").replace(/`/g,"&#96;"); }
 
 function showTooltip(ev, d) {
   const bg = KIND_COLOR[d.kind] || "#555";
