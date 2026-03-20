@@ -188,10 +188,18 @@ def _is_test_file(path: str) -> bool:
 
 
 def _is_test_function(name: str, file_path: str) -> bool:
-    """A function is a test only if its name matches test patterns.
-    Being in a test file alone is not sufficient (test files contain helpers too).
+    """A function is a test if its name matches test patterns or it lives
+    in a test file and has a test-runner name (describe, it, test, etc.).
     """
-    return any(p.search(name) for p in _TEST_PATTERNS)
+    if any(p.search(name) for p in _TEST_PATTERNS):
+        return True
+    # In test files, treat common JS/TS test-runner wrappers as tests
+    if _is_test_file(file_path) and name in (
+        "describe", "it", "test", "beforeEach", "afterEach",
+        "beforeAll", "afterAll",
+    ):
+        return True
+    return False
 
 
 def file_hash(path: Path) -> str:
@@ -250,6 +258,7 @@ class CodeParser:
         file_path_str = str(path)
 
         # File node
+        test_file = _is_test_file(file_path_str)
         nodes.append(NodeInfo(
             kind="File",
             name=file_path_str,
@@ -257,6 +266,7 @@ class CodeParser:
             line_start=1,
             line_end=source.count(b"\n") + 1,
             language=language,
+            is_test=test_file,
         ))
 
         # Pre-scan for import mappings and defined names
@@ -269,6 +279,24 @@ class CodeParser:
             tree.root_node, source, language, file_path_str, nodes, edges,
             import_map=import_map, defined_names=defined_names,
         )
+
+        # Generate TESTED_BY edges: when a test function calls a production
+        # function, create an edge from the production function back to the test.
+        if test_file:
+            test_qnames = set()
+            for n in nodes:
+                if n.is_test:
+                    qn = self._qualify(n.name, n.file_path, n.parent_name)
+                    test_qnames.add(qn)
+            for edge in list(edges):
+                if edge.kind == "CALLS" and edge.source in test_qnames:
+                    edges.append(EdgeInfo(
+                        kind="TESTED_BY",
+                        source=edge.target,
+                        target=edge.source,
+                        file_path=edge.file_path,
+                        line=edge.line,
+                    ))
 
         return nodes, edges
 

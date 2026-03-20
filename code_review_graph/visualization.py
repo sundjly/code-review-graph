@@ -322,9 +322,15 @@ edges.forEach(e => {
 
 function allDescendants(qn) {
   const result = new Set();
-  const children = containsChildren.get(qn);
-  if (!children) return result;
-  for (const c of children) { result.add(c); for (const d of allDescendants(c)) result.add(d); }
+  const stack = [qn];
+  while (stack.length) {
+    const cur = stack.pop();
+    const children = containsChildren.get(cur);
+    if (!children) continue;
+    for (const c of children) {
+      if (!result.has(c)) { result.add(c); stack.push(c); }
+    }
+  }
   return result;
 }
 
