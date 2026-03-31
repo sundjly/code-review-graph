@@ -104,6 +104,8 @@ def _handle_init(args: argparse.Namespace) -> None:
 
     dry_run = getattr(args, "dry_run", False)
     target = getattr(args, "platform", "all") or "all"
+    if target == "claude-code":
+        target = "claude"
 
     print("Installing MCP server config...")
     configured = install_platform_configs(repo_root, target=target, dry_run=dry_run)
@@ -176,7 +178,7 @@ def main() -> None:
     install_cmd.add_argument(
         "--platform",
         choices=[
-            "claude", "cursor", "windsurf", "zed",
+            "claude", "claude-code", "cursor", "windsurf", "zed",
             "continue", "opencode", "antigravity", "all",
         ],
         default="all",
@@ -206,7 +208,7 @@ def main() -> None:
     init_cmd.add_argument(
         "--platform",
         choices=[
-            "claude", "cursor", "windsurf", "zed",
+            "claude", "claude-code", "cursor", "windsurf", "zed",
             "continue", "opencode", "antigravity", "all",
         ],
         default="all",
