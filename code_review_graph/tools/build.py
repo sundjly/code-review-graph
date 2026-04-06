@@ -109,12 +109,167 @@ def _run_postprocess(
         logger.warning("Community detection failed: %s", e)
         warnings.append(f"Community detection failed: {type(e).__name__}: {e}")
 
+    # -- Compute pre-computed summary tables --
+    try:
+        _compute_summaries(store)
+        build_result["summaries_computed"] = True
+    except (sqlite3.OperationalError, Exception) as e:
+        logger.warning("Summary computation failed: %s", e)
+        warnings.append(f"Summary computation failed: {type(e).__name__}: {e}")
+
     store.set_metadata(
         "last_postprocessed_at", time.strftime("%Y-%m-%dT%H:%M:%S"),
     )
     store.set_metadata("postprocess_level", postprocess)
 
     return warnings
+
+
+def _compute_summaries(store: Any) -> None:
+    """Populate community_summaries, flow_snapshots, and risk_index tables."""
+    import json as _json
+
+    conn = store._conn
+
+    # -- community_summaries --
+    try:
+        conn.execute("DELETE FROM community_summaries")
+        rows = conn.execute(
+            "SELECT id, name, size, dominant_language FROM communities"
+        ).fetchall()
+        for r in rows:
+            cid, cname, csize, clang = r[0], r[1], r[2], r[3]
+            # Top 5 symbols by in+out edge count
+            top_symbols = conn.execute(
+                "SELECT n.name FROM nodes n "
+                "LEFT JOIN edges e1 ON e1.source_qualified = n.qualified_name "
+                "LEFT JOIN edges e2 ON e2.target_qualified = n.qualified_name "
+                "WHERE n.community_id = ? AND n.kind != 'File' "
+                "GROUP BY n.id ORDER BY COUNT(e1.id) + COUNT(e2.id) DESC "
+                "LIMIT 5",
+                (cid,),
+            ).fetchall()
+            key_syms = _json.dumps([s[0] for s in top_symbols])
+            # Auto-generate purpose from common file path prefix
+            file_rows = conn.execute(
+                "SELECT DISTINCT file_path FROM nodes WHERE community_id = ? LIMIT 20",
+                (cid,),
+            ).fetchall()
+            paths = [fr[0] for fr in file_rows]
+            purpose = ""
+            if paths:
+                from os.path import commonprefix
+                prefix = commonprefix(paths)
+                if "/" in prefix:
+                    purpose = prefix.rsplit("/", 1)[0].split("/")[-1] if "/" in prefix else ""
+            conn.execute(
+                "INSERT OR REPLACE INTO community_summaries "
+                "(community_id, name, purpose, key_symbols, size, dominant_language) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (cid, cname, purpose, key_syms, csize, clang or ""),
+            )
+    except sqlite3.OperationalError:
+        pass  # Table may not exist yet
+
+    # -- flow_snapshots --
+    try:
+        conn.execute("DELETE FROM flow_snapshots")
+        rows = conn.execute(
+            "SELECT id, name, entry_point_id, criticality, node_count, "
+            "file_count, path_json FROM flows"
+        ).fetchall()
+        for r in rows:
+            fid = r[0]
+            fname = r[1]
+            ep_id = r[2]
+            crit = r[3]
+            ncount = r[4]
+            fcount = r[5]
+            # Get entry point name
+            ep_row = conn.execute(
+                "SELECT qualified_name FROM nodes WHERE id = ?", (ep_id,),
+            ).fetchone()
+            ep_name = ep_row[0] if ep_row else str(ep_id)
+            # Compress path to entry + top 3 intermediate + exit
+            path_ids = _json.loads(r[6]) if r[6] else []
+            critical_path = []
+            if path_ids:
+                critical_path.append(ep_name)
+                if len(path_ids) > 2:
+                    # Pick up to 3 intermediate nodes
+                    for nid in path_ids[1:4]:
+                        nr = conn.execute(
+                            "SELECT name FROM nodes WHERE id = ?", (nid,),
+                        ).fetchone()
+                        if nr:
+                            critical_path.append(nr[0])
+                if len(path_ids) > 1:
+                    last = conn.execute(
+                        "SELECT name FROM nodes WHERE id = ?",
+                        (path_ids[-1],),
+                    ).fetchone()
+                    if last and last[0] not in critical_path:
+                        critical_path.append(last[0])
+            conn.execute(
+                "INSERT OR REPLACE INTO flow_snapshots "
+                "(flow_id, name, entry_point, critical_path, criticality, "
+                "node_count, file_count) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (fid, fname, ep_name, _json.dumps(critical_path),
+                 crit, ncount, fcount),
+            )
+    except sqlite3.OperationalError:
+        pass
+
+    # -- risk_index --
+    try:
+        conn.execute("DELETE FROM risk_index")
+        # Per-node risk: caller_count, test coverage, security keywords
+        nodes = conn.execute(
+            "SELECT id, qualified_name, name FROM nodes "
+            "WHERE kind IN ('Function', 'Class', 'Test')"
+        ).fetchall()
+        security_kw = {
+            "auth", "login", "password", "token", "session", "crypt",
+            "secret", "credential", "permission", "sql", "execute",
+        }
+        for n in nodes:
+            nid, qn, name = n[0], n[1], n[2]
+            # Count callers
+            caller_count = conn.execute(
+                "SELECT COUNT(*) FROM edges WHERE target_qualified = ? "
+                "AND kind = 'CALLS'", (qn,),
+            ).fetchone()[0]
+            # Test coverage
+            tested = conn.execute(
+                "SELECT COUNT(*) FROM edges WHERE source_qualified = ? "
+                "AND kind = 'TESTED_BY'", (qn,),
+            ).fetchone()[0]
+            coverage = "tested" if tested > 0 else "untested"
+            # Security relevance
+            name_lower = name.lower()
+            sec_relevant = 1 if any(kw in name_lower for kw in security_kw) else 0
+            # Compute risk score
+            risk = 0.0
+            if caller_count > 10:
+                risk += 0.3
+            elif caller_count > 3:
+                risk += 0.15
+            if coverage == "untested":
+                risk += 0.3
+            if sec_relevant:
+                risk += 0.4
+            risk = min(risk, 1.0)
+            conn.execute(
+                "INSERT OR REPLACE INTO risk_index "
+                "(node_id, qualified_name, risk_score, caller_count, "
+                "test_coverage, security_relevant, last_computed) "
+                "VALUES (?, ?, ?, ?, ?, ?, datetime('now'))",
+                (nid, qn, risk, caller_count, coverage, sec_relevant),
+            )
+    except sqlite3.OperationalError:
+        pass
+
+    conn.commit()
 
 
 def build_or_update_graph(
