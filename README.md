@@ -246,7 +246,9 @@ code-review-graph serve            # Start MCP server
 <summary><strong>Multi-repo daemon</strong></summary>
 <br>
 
-Watch multiple repositories simultaneously with a single daemon process:
+The multi-repo watch daemon is included with `code-review-graph` — no separate
+install required. Watch multiple repositories simultaneously with a single daemon
+process:
 
 ```bash
 crg-daemon add ~/project-a --alias proj-a

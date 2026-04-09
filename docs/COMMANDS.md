@@ -250,7 +250,7 @@ code-review-graph register <path> [--alias name]  # Register a repository
 code-review-graph unregister <path_or_alias>       # Remove from registry
 code-review-graph repos                            # List registered repositories
 
-# Daemon (multi-repo watcher)
+# Daemon (multi-repo watcher) — included with install, no extra dependencies
 code-review-graph daemon start [--foreground]       # Start the watch daemon
 code-review-graph daemon stop                       # Stop the daemon
 code-review-graph daemon restart [--foreground]     # Restart the daemon
@@ -268,8 +268,8 @@ code-review-graph serve                        # Start MCP server (stdio)
 
 ## Standalone Daemon CLI (`crg-daemon`)
 
-The `crg-daemon` command is also available as a standalone entry point (installed via
-`pip install code-review-graph` or `pipx install code-review-graph`). It mirrors the
+The `crg-daemon` command is included with every `code-review-graph` installation — no
+separate install required. It is also available as a standalone entry point. It mirrors the
 `code-review-graph daemon` subcommands:
 
 ```bash
