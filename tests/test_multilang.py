@@ -137,18 +137,133 @@ class TestJavaParsing:
         assert "save" in names
         assert "getUser" in names
 
+    def test_method_names_not_return_types(self):
+        """Method names must be the actual name, not the return type.
+
+        tree-sitter-java puts type_identifier (return type) before
+        identifier (method name).  Without the Java-specific branch in
+        _get_name the generic loop picks up the return type instead.
+        """
+        funcs = [n for n in self.nodes if n.kind == "Function"]
+        names = {f.name for f in funcs}
+        # getName()/getEmail() return String — must not be indexed as "String"
+        assert "getName" in names
+        assert "getEmail" in names
+        assert "getId" in names
+        # createUser() returns User — must not be indexed as "User" (the class)
+        assert "createUser" in names
+
     def test_finds_imports(self):
         imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
         assert len(imports) >= 2
 
     def test_finds_inheritance(self):
         inherits = [e for e in self.edges if e.kind == "INHERITS"]
-        # InMemoryRepo implements UserRepository
-        assert len(inherits) >= 1
+        # InMemoryRepo implements UserRepository + CachedRepo extends InMemoryRepo
+        assert len(inherits) >= 2
+        targets = {e.target for e in inherits}
+        assert "UserRepository" in targets
+        assert "InMemoryRepo" in targets
+
+    def test_inheritance_target_is_bare_name(self):
+        """INHERITS edge target must be the type name, not 'implements Foo'.
+
+        tree-sitter-java wraps extends/implements in superclass and
+        super_interfaces nodes whose .text includes the keyword.
+        Without the Java-specific branch in _get_bases the full text
+        (e.g. 'implements UserRepository') is stored as the edge target.
+        """
+        inherits = [e for e in self.edges if e.kind == "INHERITS"]
+        # Must have both extends and implements edges to test both paths
+        assert len(inherits) >= 2, (
+            "Expected at least 2 INHERITS edges (extends + implements)"
+        )
+        for e in inherits:
+            assert not e.target.startswith("implements "), (
+                f"INHERITS target should be bare type name, got: {e.target!r}"
+            )
+            assert not e.target.startswith("extends "), (
+                f"INHERITS target should be bare type name, got: {e.target!r}"
+            )
 
     def test_finds_calls(self):
         calls = [e for e in self.edges if e.kind == "CALLS"]
         assert len(calls) >= 3
+
+
+class TestJavaImportResolution:
+    """Test that Java imports are resolved to absolute file paths."""
+
+    def test_resolves_project_import(self, tmp_path):
+        """Import of a project class resolves to its .java file."""
+        # Create a mini Java project with two packages
+        auth = tmp_path / "src/main/java/com/example/auth"
+        auth.mkdir(parents=True)
+        (auth / "User.java").write_text(
+            "package com.example.auth;\npublic class User {}\n"
+        )
+        svc = tmp_path / "src/main/java/com/example/service"
+        svc.mkdir(parents=True)
+        (svc / "App.java").write_text(
+            "package com.example.service;\n"
+            "import com.example.auth.User;\n"
+            "public class App {}\n"
+        )
+
+        parser = CodeParser()
+        _, edges = parser.parse_file(svc / "App.java")
+        imports = [e for e in edges if e.kind == "IMPORTS_FROM"]
+        assert len(imports) == 1
+        assert imports[0].target == str((auth / "User.java").resolve())
+
+    def test_jdk_import_stays_unresolved(self):
+        """JDK imports have no local file and remain as raw strings."""
+        parser = CodeParser()
+        _, edges = parser.parse_file(FIXTURES / "SampleJava.java")
+        imports = [e for e in edges if e.kind == "IMPORTS_FROM"]
+        # All imports in SampleJava.java are java.util.* (JDK)
+        for e in imports:
+            assert not e.target.endswith(".java"), (
+                f"JDK import should not resolve to a file: {e.target!r}"
+            )
+
+    def test_static_import_resolves_to_class(self, tmp_path):
+        """Static import of a member resolves to the enclosing class file."""
+        pkg = tmp_path / "src/main/java/com/example/util"
+        pkg.mkdir(parents=True)
+        (pkg / "Helper.java").write_text(
+            "package com.example.util;\n"
+            "public class Helper { public static int MAX = 1; }\n"
+        )
+        app_dir = tmp_path / "src/main/java/com/example/app"
+        app_dir.mkdir(parents=True)
+        (app_dir / "App.java").write_text(
+            "package com.example.app;\n"
+            "import static com.example.util.Helper.MAX;\n"
+            "public class App {}\n"
+        )
+
+        parser = CodeParser()
+        _, edges = parser.parse_file(app_dir / "App.java")
+        imports = [e for e in edges if e.kind == "IMPORTS_FROM"]
+        assert len(imports) == 1
+        assert imports[0].target == str((pkg / "Helper.java").resolve())
+
+    def test_wildcard_import_stays_unresolved(self, tmp_path):
+        """Wildcard imports cannot resolve to a single file."""
+        app_dir = tmp_path / "src/main/java/com/example"
+        app_dir.mkdir(parents=True)
+        (app_dir / "App.java").write_text(
+            "package com.example;\n"
+            "import java.util.*;\n"
+            "public class App {}\n"
+        )
+
+        parser = CodeParser()
+        _, edges = parser.parse_file(app_dir / "App.java")
+        imports = [e for e in edges if e.kind == "IMPORTS_FROM"]
+        assert len(imports) == 1
+        assert imports[0].target == "java.util.*"
 
 
 class TestCParsing:
@@ -268,6 +383,33 @@ class TestPHPParsing:
         names = {f.name for f in funcs}
         assert len(names) > 0
 
+    def test_finds_calls(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        target_names = {t.split("::")[-1].split(".")[-1] for t in targets}
+
+        run_queries_targets = {
+            e.target for e in calls if e.source.endswith("::ExtendedRepo.runQueries")
+        }
+
+        # Plain function calls
+        assert "sqlQuery" in target_names
+        assert "xl" in target_names
+        assert "text" in target_names
+
+        # Member and nullsafe method calls
+        assert "execute" in target_names
+        assert "search" in target_names
+
+        # Scoped/static calls
+        assert "QueryUtils::fetchRecords" in targets
+        assert "EncounterService::create" in targets
+        assert any(t.endswith("__construct") for t in run_queries_targets)
+        assert any(t.endswith("factory") for t in run_queries_targets)
+
+        # Global namespaced calls should normalize to a stable name
+        assert "dirname" in target_names
+
 
 class TestKotlinParsing:
     def setup_method(self):
@@ -307,12 +449,61 @@ class TestSwiftParsing:
     def test_finds_classes(self):
         classes = [n for n in self.nodes if n.kind == "Class"]
         names = {c.name for c in classes}
-        assert "User" in names or "InMemoryRepo" in names
+        assert "User" in names
+        assert "InMemoryRepo" in names
 
     def test_finds_functions(self):
         funcs = [n for n in self.nodes if n.kind == "Function"]
         names = {f.name for f in funcs}
         assert "createUser" in names or "findById" in names or "save" in names
+
+    def test_finds_enum(self):
+        classes = [n for n in self.nodes if n.kind == "Class"]
+        names = {c.name for c in classes}
+        assert "Direction" in names
+
+    def test_finds_actor(self):
+        classes = [n for n in self.nodes if n.kind == "Class"]
+        names = {c.name for c in classes}
+        assert "DataStore" in names
+
+    def test_finds_extension(self):
+        """Extensions should be detected and linked to the extended type."""
+        classes = [n for n in self.nodes if n.kind == "Class"]
+        # Extension of InMemoryRepo should produce a Class node named InMemoryRepo
+        # with swift_kind == "extension"
+        ext_nodes = [c for c in classes if c.extra.get("swift_kind") == "extension"]
+        assert len(ext_nodes) >= 1
+        assert ext_nodes[0].name == "InMemoryRepo"
+
+    def test_finds_protocol(self):
+        classes = [n for n in self.nodes if n.kind == "Class"]
+        names = {c.name for c in classes}
+        assert "UserRepository" in names
+
+    def test_swift_kind_extra(self):
+        """Each Swift type should have the correct swift_kind in extra."""
+        classes = {n.name: n for n in self.nodes if n.kind == "Class"}
+        assert classes["User"].extra.get("swift_kind") == "struct"
+        assert classes["Direction"].extra.get("swift_kind") == "enum"
+        assert classes["DataStore"].extra.get("swift_kind") == "actor"
+        assert classes["UserRepository"].extra.get("swift_kind") == "protocol"
+        # InMemoryRepo appears twice (class + extension); check at least one is "class"
+        repo_nodes = [n for n in self.nodes if n.kind == "Class" and n.name == "InMemoryRepo"]
+        kinds = {n.extra.get("swift_kind") for n in repo_nodes}
+        assert "class" in kinds
+        assert "extension" in kinds
+
+    def test_inheritance_edges(self):
+        """Swift inheritance / conformance should produce INHERITS edges."""
+        inherits = [e for e in self.edges if e.kind == "INHERITS"]
+        targets = {e.target for e in inherits}
+        # InMemoryRepo: UserRepository
+        assert "UserRepository" in targets
+        # Direction: String
+        assert "String" in targets
+        # extension InMemoryRepo: CustomStringConvertible
+        assert "CustomStringConvertible" in targets
 
 
 class TestScalaParsing:
@@ -1038,6 +1229,39 @@ class TestBashParsing:
         assert self.parser.detect_language(Path("build.sh")) == "bash"
         assert self.parser.detect_language(Path("build.bash")) == "bash"
         assert self.parser.detect_language(Path("run.zsh")) == "bash"
+        # Regression for #235 — Korn shell (.ksh) should parse as bash.
+        assert self.parser.detect_language(Path("legacy.ksh")) == "bash"
+
+    def test_ksh_extension_parses_as_bash(self, tmp_path):
+        """Regression for #235: a real .ksh file is parsed through the bash
+        grammar end-to-end and produces the same structural nodes/edges
+        as an equivalent .sh file."""
+        fixture_source = (FIXTURES / "sample.sh").read_text(encoding="utf-8")
+        ksh_copy = tmp_path / "legacy.ksh"
+        ksh_copy.write_text(fixture_source, encoding="utf-8")
+
+        ksh_nodes, ksh_edges = self.parser.parse_file(ksh_copy)
+
+        # Language tagging: every node must be "bash".
+        assert ksh_nodes, "parser produced zero nodes for .ksh file"
+        for n in ksh_nodes:
+            assert n.language == "bash"
+
+        # Same function set as the .sh fixture.
+        ksh_funcs = {n.name for n in ksh_nodes if n.kind == "Function"}
+        sh_funcs = {n.name for n in self.nodes if n.kind == "Function"}
+        assert ksh_funcs == sh_funcs, (
+            f".ksh and .sh produced different function sets: "
+            f"sh-only={sh_funcs - ksh_funcs}, ksh-only={ksh_funcs - sh_funcs}"
+        )
+
+        # Same structural-edge totals by kind.
+        def by_kind(edges):
+            counts: dict[str, int] = {}
+            for e in edges:
+                counts[e.kind] = counts.get(e.kind, 0) + 1
+            return counts
+        assert by_kind(ksh_edges) == by_kind(self.edges)
 
     def test_nodes_have_bash_language(self):
         for n in self.nodes:
@@ -1153,3 +1377,243 @@ class TestElixirParsing:
         }
         assert any(t.endswith("::Calculator.add") for t in function_targets)
         assert any(t.endswith("::Calculator.compute") for t in function_targets)
+
+
+class TestGDScriptParsing:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "sample.gd")
+
+    def test_detects_language(self):
+        assert self.parser.detect_language(Path("player.gd")) == "gdscript"
+        assert self.parser.detect_language(Path("globals/manager.gd")) == "gdscript"
+
+    def test_finds_class_name_statement(self):
+        """File-level ``class_name X`` declaration becomes a Class node."""
+        classes = {n.name for n in self.nodes if n.kind == "Class"}
+        assert "SampleManager" in classes
+
+    def test_finds_inner_class(self):
+        classes = {n.name for n in self.nodes if n.kind == "Class"}
+        assert "Item" in classes
+
+    def test_finds_top_level_functions(self):
+        funcs = [
+            n for n in self.nodes
+            if n.kind == "Function" and n.parent_name is None
+        ]
+        names = {f.name for f in funcs}
+        for expected in ("_ready", "_load_items", "get_item", "helper"):
+            assert expected in names, f"missing top-level function {expected}"
+
+    def test_finds_inner_class_methods(self):
+        """Methods defined inside ``class Inner:`` should attach to the inner class."""
+        inner_funcs = [
+            n for n in self.nodes
+            if n.kind == "Function" and n.parent_name == "Item"
+        ]
+        names = {f.name for f in inner_funcs}
+        assert "promote" in names
+
+    def test_finds_extends_as_import(self):
+        """``extends Node`` is the GDScript analogue of an import — parent class."""
+        imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        targets = {e.target for e in imports}
+        assert "Node" in targets, f"expected Node in imports, got {targets}"
+
+    def test_finds_direct_calls(self):
+        """Bare calls (``range(...)``, ``_load_items()``) produce CALLS edges."""
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert "range" in targets
+
+    def test_finds_attribute_calls(self):
+        """``obj.method(...)`` calls live inside ``attribute`` nodes as ``attribute_call``."""
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        # timer.start(), items.append(item), item_added.emit(item)
+        assert "start" in targets
+        assert "append" in targets
+        assert "emit" in targets
+
+    def test_internal_calls_resolve_to_qualified_names(self):
+        """A bare ``_load_items()`` call inside _ready should resolve to the
+        same-file function's qualified name."""
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert any(t.endswith("::_load_items") for t in targets), (
+            f"expected ::_load_items in call targets, got {targets}"
+        )
+
+    def test_contains_edges_wire_classes_and_functions(self):
+        contains = [(e.source, e.target) for e in self.edges if e.kind == "CONTAINS"]
+        # File CONTAINS the top-level Class and Function nodes.
+        file_contains = {t for s, t in contains if not s.endswith(".gd::Item")
+                         and not s.endswith(".gd::SampleManager")}
+        assert any(t.endswith("::SampleManager") for t in file_contains)
+        assert any(t.endswith("::Item") for t in file_contains)
+        assert any(t.endswith("::_ready") for t in file_contains)
+        # Inner class CONTAINS its method.
+        item_contains = {t for s, t in contains if s.endswith("::Item")}
+        assert any(t.endswith("::Item.promote") for t in item_contains)
+
+class TestJuliaParsing:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "sample.jl")
+
+    def test_detects_language(self):
+        assert self.parser.detect_language(Path("foo.jl")) == "julia"
+
+    def test_finds_module(self):
+        classes = {n.name for n in self.nodes if n.kind == "Class"}
+        assert "SampleModule" in classes
+
+    def test_finds_structs(self):
+        classes = {n.name for n in self.nodes if n.kind == "Class"}
+        assert "Dog" in classes
+        assert "MutablePoint" in classes
+
+    def test_finds_abstract_types(self):
+        classes = {n.name for n in self.nodes if n.kind == "Class"}
+        assert "AbstractAnimal" in classes
+
+    def test_struct_inheritance(self):
+        inherits = [e for e in self.edges if e.kind == "INHERITS"]
+        # Dog's qualified source is file::SampleModule.Dog; we only care
+        # about the trailing struct name and the target.
+        pairs = {
+            (e.source.split("::")[-1].split(".")[-1], e.target)
+            for e in inherits
+        }
+        assert ("Dog", "AbstractAnimal") in pairs
+
+    def test_finds_long_form_functions(self):
+        funcs = {n.name for n in self.nodes if n.kind == "Function"}
+        assert "greet" in funcs
+        assert "outer" in funcs
+        assert "inner" in funcs
+        assert "process" in funcs
+        assert "show" in funcs
+
+    def test_finds_short_form_functions(self):
+        funcs = {n.name for n in self.nodes if n.kind == "Function"}
+        assert "add" in funcs
+        assert "square" in funcs
+
+    def test_finds_macros(self):
+        funcs = {n.name for n in self.nodes if n.kind == "Function"}
+        assert "sayhello" in funcs
+
+    def test_finds_imports(self):
+        imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        targets = {e.target for e in imports}
+        assert "LinearAlgebra" in targets
+        assert "JSON" in targets
+
+    def test_finds_selective_imports(self):
+        imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        targets = {e.target for e in imports}
+        assert "Statistics.mean" in targets or "Statistics" in targets
+        assert "Statistics.std" in targets or "Statistics" in targets
+
+    def test_finds_base_imports(self):
+        imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        targets = {e.target for e in imports}
+        assert "Base.show" in targets or "Base" in targets
+        assert "Base.print" in targets or "Base" in targets
+
+    def test_finds_include(self):
+        imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        targets = {e.target for e in imports}
+        assert any("utils.jl" in t for t in targets)
+
+    def test_finds_calls(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        assert len(calls) >= 1
+
+    def test_finds_contains(self):
+        contains = [e for e in self.edges if e.kind == "CONTAINS"]
+        assert len(contains) >= 3
+
+    def test_finds_exports(self):
+        refs = [
+            e for e in self.edges
+            if e.kind == "REFERENCES"
+            and e.extra
+            and e.extra.get("julia_export")
+        ]
+        # Targets may be resolved to qualified names (file::SampleModule.greet)
+        # if the exported symbol is defined locally; otherwise they stay bare.
+        trailing = {e.target.split(".")[-1] for e in refs}
+        assert "greet" in trailing
+        assert "Dog" in trailing
+        assert "process" in trailing
+
+    def test_finds_testsets(self):
+        tests = [n for n in self.nodes if n.kind == "Test"]
+        assert any("Arithmetic" in t.name for t in tests)
+
+    def test_nested_function_parent(self):
+        contains = [e for e in self.edges if e.kind == "CONTAINS"]
+        # The CONTAINS edge for inner should originate from outer, and
+        # its qualified target should carry `outer.inner` in the name.
+        assert any(
+            e.source.endswith("outer")
+            and e.target.endswith("outer.inner")
+            for e in contains
+        )
+
+    def test_qualified_function_name(self):
+        funcs = {n.name for n in self.nodes if n.kind == "Function"}
+        # function Base.show(...) -> name is "show", not "Base.show"
+        assert "show" in funcs
+        assert "Base.show" not in funcs
+
+    def test_nodes_have_julia_language(self):
+        nameable = [n for n in self.nodes if n.kind in ("Class", "Function", "Test")]
+        assert all(n.language == "julia" for n in nameable)
+        assert len(nameable) >= 5
+
+    def test_finds_enum_type(self):
+        classes = [n for n in self.nodes if n.kind == "Class"]
+        by_name = {c.name: c for c in classes}
+        assert "Color" in by_name
+        assert by_name["Color"].extra.get("julia_kind") == "enum"
+
+    def test_finds_enum_variants(self):
+        variants = {
+            n.name for n in self.nodes
+            if n.kind == "Function"
+            and (n.extra or {}).get("julia_kind") == "enum_variant"
+        }
+        assert {"RED", "BLUE", "GREEN"} <= variants
+
+    def test_enum_variants_contained_by_type(self):
+        contains = [e for e in self.edges if e.kind == "CONTAINS"]
+        # Color -> RED, BLUE, GREEN
+        variants_under_color = {
+            e.target.split(".")[-1]
+            for e in contains
+            if e.source.endswith("Color")
+        }
+        assert {"RED", "BLUE", "GREEN"} <= variants_under_color
+
+    def test_finds_public_symbols(self):
+        refs = [
+            e for e in self.edges
+            if e.kind == "REFERENCES"
+            and e.extra
+            and e.extra.get("julia_public")
+        ]
+        trailing = {e.target.split(".")[-1] for e in refs}
+        assert "square" in trailing
+        assert "add" in trailing
+
+    def test_qualified_function_references_base(self):
+        refs = [e for e in self.edges if e.kind == "REFERENCES"]
+        # function Base.show(...) should emit a REFERENCES edge to Base
+        assert any(
+            "show" in e.source and e.target == "Base"
+            for e in refs
+        )

@@ -110,8 +110,121 @@ class TestFlows:
         assert "regular_func" not in ep_names
 
     # ---------------------------------------------------------------
+    # detect_entry_points -- expanded decorator patterns
+    # ---------------------------------------------------------------
+
+    def test_detect_entry_points_pytest_fixture(self):
+        """pytest.fixture decorator marks function as entry point."""
+        self._add_func("my_fixture", extra={"decorators": ["pytest.fixture"]})
+        eps = detect_entry_points(self.store)
+        ep_names = {ep.name for ep in eps}
+        assert "my_fixture" in ep_names
+
+    def test_detect_entry_points_django_receiver(self):
+        """Django signal receiver decorator marks function as entry point."""
+        self._add_func("on_save", extra={"decorators": ["receiver(post_save)"]})
+        eps = detect_entry_points(self.store)
+        ep_names = {ep.name for ep in eps}
+        assert "on_save" in ep_names
+
+    def test_detect_entry_points_spring_scheduled(self):
+        """Java Spring @Scheduled marks function as entry point."""
+        self._add_func("cleanup_job", extra={"decorators": ["Scheduled(cron='0 0 * * *')"]})
+        eps = detect_entry_points(self.store)
+        ep_names = {ep.name for ep in eps}
+        assert "cleanup_job" in ep_names
+
+    def test_detect_entry_points_celery_task(self):
+        """Bare @task decorator marks function as entry point."""
+        self._add_func("process_data", extra={"decorators": ["task"]})
+        eps = detect_entry_points(self.store)
+        ep_names = {ep.name for ep in eps}
+        assert "process_data" in ep_names
+
+    def test_detect_entry_points_agent_tool(self):
+        """@agent.tool decorator marks function as entry point."""
+        self._add_func("query_health", extra={"decorators": ["health_agent.tool"]})
+        eps = detect_entry_points(self.store)
+        ep_names = {ep.name for ep in eps}
+        assert "query_health" in ep_names
+
+    def test_detect_entry_points_alembic(self):
+        """upgrade/downgrade functions are entry points."""
+        self._add_func("upgrade")
+        self._add_func("downgrade")
+        eps = detect_entry_points(self.store)
+        ep_names = {ep.name for ep in eps}
+        assert "upgrade" in ep_names
+        assert "downgrade" in ep_names
+
+    def test_detect_entry_points_lifespan(self):
+        """FastAPI lifespan function is an entry point."""
+        self._add_func("lifespan")
+        eps = detect_entry_points(self.store)
+        ep_names = {ep.name for ep in eps}
+        assert "lifespan" in ep_names
+
+    # ---------------------------------------------------------------
     # trace_flows
     # ---------------------------------------------------------------
+
+    def test_detect_entry_points_excludes_tests_by_default(self):
+        """Test nodes are excluded from entry points by default."""
+        self._add_func("production_handler")
+        self._add_func("it:should do something", is_test=True)
+        self.store.commit()
+
+        eps = detect_entry_points(self.store)
+        ep_names = {ep.name for ep in eps}
+        assert "production_handler" in ep_names
+        assert "it:should do something" not in ep_names
+
+        # With include_tests=True, both appear
+        eps_all = detect_entry_points(self.store, include_tests=True)
+        ep_names_all = {ep.name for ep in eps_all}
+        assert "production_handler" in ep_names_all
+        assert "it:should do something" in ep_names_all
+
+    def test_detect_entry_points_excludes_test_files(self):
+        """Functions in test files (*.spec.ts, *.test.ts) are excluded by default."""
+        self._add_func("production_func", path="src/handler.ts")
+        self._add_func("describe_block", path="src/handler.spec.ts")
+        self._add_func("test_helper", path="tests/__tests__/utils.ts")
+
+        eps = detect_entry_points(self.store)
+        ep_files = {ep.file_path for ep in eps}
+        assert "src/handler.ts" in ep_files
+        assert "src/handler.spec.ts" not in ep_files
+        assert "tests/__tests__/utils.ts" not in ep_files
+
+        # With include_tests=True, they appear
+        eps_all = detect_entry_points(self.store, include_tests=True)
+        ep_files_all = {ep.file_path for ep in eps_all}
+        assert "src/handler.spec.ts" in ep_files_all
+
+    def test_detect_entry_points_module_scope_caller_is_still_root(self):
+        """A function called only from module scope (File-sourced CALLS) is a root.
+
+        Regression guard: the parser attributes module-scope calls to the File
+        node. Without filtering File-sourced callers, ``run_job`` here would
+        look "called" by ``script.py`` and be excluded from flow analysis,
+        even though in practice it IS an entry point (the script itself is
+        invoked externally).
+        """
+        self._add_func("run_job", path="script.py")
+        # Ensure the File node exists so its qualified_name resolves cleanly
+        # (production code creates this automatically during parsing).
+        self.store.upsert_node(NodeInfo(
+            kind="File", name="script.py", file_path="script.py",
+            line_start=1, line_end=10, language="python",
+        ))
+        self.store.commit()
+        # Module-scope call: source is the File node's qualified_name.
+        self._add_call("script.py", "script.py::run_job", path="script.py")
+
+        eps = detect_entry_points(self.store)
+        ep_names = {ep.name for ep in eps}
+        assert "run_job" in ep_names
 
     def test_trace_simple_flow(self):
         """BFS traces a linear call chain: A -> B -> C."""
@@ -469,3 +582,31 @@ class TestFlows:
         assert count == 0
         # Original flows unchanged.
         assert len(get_flows(self.store)) == initial_count
+
+    def test_incremental_trace_flows_delete_is_atomic(self):
+        """Regression test for #258: the DELETE loop in incremental_trace_flows
+        must be wrapped in a transaction so a crash mid-loop cannot leave
+        orphaned flow_memberships rows."""
+        self._add_func("handler", path="routes.py")
+        self._add_func("service", path="services.py")
+        self._add_call("routes.py::handler", "services.py::service", "routes.py")
+
+        flows = trace_flows(self.store)
+        store_flows(self.store, flows)
+        assert len(get_flows(self.store)) > 0
+
+        # Incremental trace touching routes.py should delete old flows and
+        # re-trace them.  The key assertion is that this does NOT raise
+        # "cannot start a transaction within a transaction" and that the
+        # DB ends in a consistent state.
+        count = incremental_trace_flows(self.store, ["routes.py"])
+        # The re-trace should find the same entry points.
+        assert count >= 0
+        # No orphaned memberships: every membership references a valid flow.
+        conn = self.store._conn
+        orphans = conn.execute(
+            "SELECT fm.flow_id FROM flow_memberships fm "
+            "LEFT JOIN flows f ON f.id = fm.flow_id "
+            "WHERE f.id IS NULL"
+        ).fetchall()
+        assert len(orphans) == 0, f"found {len(orphans)} orphaned memberships"
