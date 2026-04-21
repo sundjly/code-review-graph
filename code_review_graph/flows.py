@@ -15,7 +15,7 @@ from collections import deque
 from typing import Optional
 
 from .constants import SECURITY_KEYWORDS as _SECURITY_KEYWORDS
-from .graph import GraphNode, GraphStore, _sanitize_name
+from .graph import FlowAdjacency, GraphNode, GraphStore, _sanitize_name
 
 logger = logging.getLogger(__name__)
 
@@ -25,14 +25,46 @@ logger = logging.getLogger(__name__)
 
 # Decorator patterns that indicate a function is a framework entry point.
 _FRAMEWORK_DECORATOR_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"app\.(get|post|put|delete|patch|route|websocket)", re.IGNORECASE),
+    # Python web frameworks
+    re.compile(r"app\.(get|post|put|delete|patch|route|websocket|on_event)", re.IGNORECASE),
     re.compile(r"router\.(get|post|put|delete|patch|route)", re.IGNORECASE),
     re.compile(r"blueprint\.(route|before_request|after_request)", re.IGNORECASE),
+    re.compile(r"(before|after)_(request|response)", re.IGNORECASE),
+    # CLI frameworks
     re.compile(r"click\.(command|group)", re.IGNORECASE),
-    re.compile(r"celery\.(task|shared_task)", re.IGNORECASE),
+    re.compile(r"\w+\.(command|group)\b", re.IGNORECASE),  # Click subgroups: @mygroup.command()
+    # Pydantic validators/serializers
+    re.compile(r"(field|model)_(serializer|validator)", re.IGNORECASE),
+    # Task queues
+    re.compile(r"(celery\.)?(task|shared_task|periodic_task)", re.IGNORECASE),
+    # Django
+    re.compile(r"receiver", re.IGNORECASE),
     re.compile(r"api_view", re.IGNORECASE),
     re.compile(r"\baction\b", re.IGNORECASE),
-    re.compile(r"@(Get|Post|Put|Delete|Patch|RequestMapping)", re.IGNORECASE),
+    # Testing
+    re.compile(r"pytest\.(fixture|mark)"),
+    re.compile(r"(override_settings|modify_settings)", re.IGNORECASE),
+    # SQLAlchemy / event systems
+    re.compile(r"(event\.)?listens_for", re.IGNORECASE),
+    # Java Spring
+    re.compile(r"(Get|Post|Put|Delete|Patch|RequestMapping)Mapping", re.IGNORECASE),
+    re.compile(r"(Scheduled|EventListener|Bean|Configuration)", re.IGNORECASE),
+    # JS/TS frameworks
+    re.compile(r"(Component|Injectable|Controller|Module|Guard|Pipe)", re.IGNORECASE),
+    re.compile(r"(Subscribe|Mutation|Query|Resolver)", re.IGNORECASE),
+    # Express / Koa / Hono route handlers
+    re.compile(r"(app|router)\.(get|post|put|delete|patch|use|all)\b"),
+    # Android lifecycle
+    re.compile(r"@(Override|OnLifecycleEvent|Composable)", re.IGNORECASE),
+    # Kotlin coroutines / Android ViewModel
+    re.compile(r"(HiltViewModel|AndroidEntryPoint|Inject)", re.IGNORECASE),
+    # AI/agent frameworks (pydantic-ai, langchain, etc.)
+    re.compile(r"\w+\.(tool|tool_plain|system_prompt|result_validator)\b", re.IGNORECASE),
+    re.compile(r"^tool\b"),  # bare @tool (LangChain, etc.)
+    # Middleware and exception handlers (Starlette, FastAPI, Sanic)
+    re.compile(r"\w+\.(middleware|exception_handler|on_exception)\b", re.IGNORECASE),
+    # Generic route decorator (Flask blueprints: @bp.route, @auth_bp.route, etc.)
+    re.compile(r"\w+\.route\b", re.IGNORECASE),
 ]
 
 # Name patterns that indicate conventional entry points.
@@ -43,6 +75,38 @@ _ENTRY_NAME_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"^Test[A-Z]"),
     re.compile(r"^on_"),
     re.compile(r"^handle_"),
+    # Lambda / serverless handler functions (wired via config, not code calls)
+    re.compile(r"^handler$"),
+    re.compile(r"^handle$"),
+    re.compile(r"^lambda_handler$"),
+    # Alembic migration entry points
+    re.compile(r"^upgrade$"),
+    re.compile(r"^downgrade$"),
+    # FastAPI lifecycle / dependency injection
+    re.compile(r"^lifespan$"),
+    re.compile(r"^get_db$"),
+    # Android Activity/Fragment lifecycle
+    re.compile(r"^on(Create|Start|Resume|Pause|Stop|Destroy|Bind|Receive)"),
+    # Servlet / JAX-RS
+    re.compile(r"^do(Get|Post|Put|Delete)$"),
+    # Python BaseHTTPRequestHandler
+    re.compile(r"^do_(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)$"),
+    re.compile(r"^log_message$"),
+    # Express middleware signature
+    re.compile(r"^(middleware|errorHandler)$"),
+    # Angular lifecycle hooks
+    re.compile(
+        r"^ng(OnInit|OnChanges|OnDestroy|DoCheck"
+        r"|AfterContentInit|AfterContentChecked|AfterViewInit|AfterViewChecked)$"
+    ),
+    # Angular Pipe / ControlValueAccessor / Guards / Resolvers
+    re.compile(r"^(transform|writeValue|registerOnChange|registerOnTouched|setDisabledState)$"),
+    re.compile(r"^(canActivate|canDeactivate|canActivateChild|canLoad|canMatch|resolve)$"),
+    # React class component lifecycle
+    re.compile(
+        r"^(componentDidMount|componentDidUpdate|componentWillUnmount"
+        r"|shouldComponentUpdate|render)$"
+    ),
 ]
 
 
@@ -73,16 +137,35 @@ def _matches_entry_name(node: GraphNode) -> bool:
     return False
 
 
-def detect_entry_points(store: GraphStore) -> list[GraphNode]:
+_TEST_FILE_RE = re.compile(
+    r"([\\/]__tests__[\\/]|\.spec\.[jt]sx?$|\.test\.[jt]sx?$|[\\/]test_[^/\\]*\.py$)",
+)
+
+
+def _is_test_file(file_path: str) -> bool:
+    """Return True if *file_path* looks like a test file."""
+    return bool(_TEST_FILE_RE.search(file_path))
+
+
+def detect_entry_points(
+    store: GraphStore,
+    include_tests: bool = False,
+) -> list[GraphNode]:
     """Find functions that are entry points in the graph.
 
     An entry point is a Function/Test node that either:
     1. Has no incoming CALLS edges (true root), or
     2. Has a framework decorator (e.g. ``@app.get``), or
     3. Matches a conventional name pattern (``main``, ``test_*``, etc.).
+
+    When *include_tests* is False (the default), Test nodes are excluded so
+    that flow analysis focuses on production entry points.
     """
-    # Build a set of all qualified names that are CALLS targets.
-    called_qnames = store.get_all_call_targets()
+    # Build a set of all qualified names that are CALLS targets. Exclude
+    # edges sourced at File nodes so that script-/notebook-/top-level-only
+    # callees (e.g. ``run_job()`` invoked from module scope, a top-level
+    # ``<App />`` render) remain detectable as entry points.
+    called_qnames = store.get_all_call_targets(include_file_sources=False)
 
     # Scan all nodes for entry-point candidates.
     candidate_nodes = store.get_nodes_by_kind(["Function", "Test"])
@@ -91,6 +174,9 @@ def detect_entry_points(store: GraphStore) -> list[GraphNode]:
     seen_qn: set[str] = set()
 
     for node in candidate_nodes:
+        if not include_tests and (node.is_test or _is_test_file(node.file_path)):
+            continue
+
         is_entry = False
 
         # True root: no one calls this function.
@@ -118,7 +204,7 @@ def detect_entry_points(store: GraphStore) -> list[GraphNode]:
 
 
 def _trace_single_flow(
-    store: GraphStore,
+    adj: FlowAdjacency,
     ep: GraphNode,
     max_depth: int = 15,
 ) -> Optional[dict]:
@@ -127,18 +213,14 @@ def _trace_single_flow(
     Returns a flow dict (see :func:`trace_flows` for the schema) or ``None``
     if the flow is trivial (single-node, no outgoing CALLS that resolve).
     """
-    path_ids: list[int] = []
-    path_qnames: list[str] = []
-    visited: set[str] = set()
-    queue: deque[tuple[str, int]] = deque()
-
-    # Seed with the entry point itself.
-    queue.append((ep.qualified_name, 0))
-    visited.add(ep.qualified_name)
-    path_ids.append(ep.id)
-    path_qnames.append(ep.qualified_name)
+    path_ids: list[int] = [ep.id]
+    path_qnames: list[str] = [ep.qualified_name]
+    visited: set[str] = {ep.qualified_name}
+    queue: deque[tuple[str, int]] = deque([(ep.qualified_name, 0)])
 
     actual_depth = 0
+    nodes_by_qn = adj.nodes_by_qn
+    calls_out = adj.calls_out
 
     while queue:
         current_qn, depth = queue.popleft()
@@ -147,16 +229,10 @@ def _trace_single_flow(
         if depth >= max_depth:
             continue
 
-        # Follow forward CALLS edges.
-        edges = store.get_edges_by_source(current_qn)
-        for edge in edges:
-            if edge.kind != "CALLS":
-                continue
-            target_qn = edge.target_qualified
+        for target_qn in calls_out.get(current_qn, ()):
             if target_qn in visited:
                 continue
-            # Resolve the target node to get its id.
-            target_node = store.get_node(target_qn)
+            target_node = nodes_by_qn.get(target_qn)
             if target_node is None:
                 continue
             visited.add(target_qn)
@@ -171,7 +247,7 @@ def _trace_single_flow(
     files = list({
         n.file_path
         for qn in path_qnames
-        if (n := store.get_node(qn)) is not None
+        if (n := nodes_by_qn.get(qn)) is not None
     })
 
     flow: dict = {
@@ -185,11 +261,15 @@ def _trace_single_flow(
         "files": files,
         "criticality": 0.0,
     }
-    flow["criticality"] = compute_criticality(flow, store)
+    flow["criticality"] = compute_criticality(flow, adj)
     return flow
 
 
-def trace_flows(store: GraphStore, max_depth: int = 15) -> list[dict]:
+def trace_flows(
+    store: GraphStore,
+    max_depth: int = 15,
+    include_tests: bool = False,
+) -> list[dict]:
     """Trace execution flows from every entry point via forward BFS.
 
     Returns a list of flow dicts, each containing:
@@ -203,11 +283,15 @@ def trace_flows(store: GraphStore, max_depth: int = 15) -> list[dict]:
       - files: list of distinct file paths
       - criticality: computed criticality score (0.0-1.0)
     """
-    entry_points = detect_entry_points(store)
+    entry_points = detect_entry_points(store, include_tests=include_tests)
+    if not entry_points:
+        return []
+
+    adj = store.load_flow_adjacency()
     flows: list[dict] = []
 
     for ep in entry_points:
-        flow = _trace_single_flow(store, ep, max_depth)
+        flow = _trace_single_flow(adj, ep, max_depth)
         if flow is not None:
             flows.append(flow)
 
@@ -221,7 +305,7 @@ def trace_flows(store: GraphStore, max_depth: int = 15) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def compute_criticality(flow: dict, store: GraphStore) -> float:
+def compute_criticality(flow: dict, adj: FlowAdjacency) -> float:
     """Score a flow from 0.0 to 1.0 based on multiple weighted factors.
 
     Weights:
@@ -235,13 +319,14 @@ def compute_criticality(flow: dict, store: GraphStore) -> float:
     if not node_ids:
         return 0.0
 
-    # Resolve nodes once.
-    nodes: list[GraphNode] = []
-    for nid in node_ids:
-        n = store.get_node_by_id(nid)
-        if n:
-            nodes.append(n)
+    nodes_by_id = adj.nodes_by_id
+    nodes_by_qn = adj.nodes_by_qn
+    calls_out = adj.calls_out
+    has_tested_by = adj.has_tested_by
 
+    nodes: list[GraphNode] = [
+        n for nid in node_ids if (n := nodes_by_id.get(nid)) is not None
+    ]
     if not nodes:
         return 0.0
 
@@ -254,9 +339,8 @@ def compute_criticality(flow: dict, store: GraphStore) -> float:
     # Calls that target nodes NOT in the graph are considered external.
     external_count = 0
     for n in nodes:
-        edges = store.get_edges_by_source(n.qualified_name)
-        for e in edges:
-            if e.kind == "CALLS" and store.get_node(e.target_qualified) is None:
+        for target_qn in calls_out.get(n.qualified_name, ()):
+            if target_qn not in nodes_by_qn:
                 external_count += 1
     # Normalize: 0 => 0.0, 5+ => 1.0
     external_score = min(external_count / 5.0, 1.0)
@@ -273,13 +357,7 @@ def compute_criticality(flow: dict, store: GraphStore) -> float:
     security_score = min(security_hits / max(len(nodes), 1), 1.0)
 
     # --- Test coverage gap (0.0 - 1.0) ---
-    tested_count = 0
-    for n in nodes:
-        tested_edges = store.get_edges_by_target(n.qualified_name)
-        for te in tested_edges:
-            if te.kind == "TESTED_BY":
-                tested_count += 1
-                break
+    tested_count = sum(1 for n in nodes if n.qualified_name in has_tested_by)
     coverage = tested_count / max(len(nodes), 1)
     test_gap = 1.0 - coverage
 
@@ -314,41 +392,50 @@ def store_flows(store: GraphStore, flows: list[dict]) -> int:
     # tightly coupled to the DB transaction lifecycle.
     conn = store._conn
 
-    # Clear old data.
-    conn.execute("DELETE FROM flow_memberships")
-    conn.execute("DELETE FROM flows")
+    if conn.in_transaction:
+        logger.warning("Rolling back uncommitted transaction before BEGIN IMMEDIATE")
+        conn.rollback()
+    # Wrap the full DELETE + INSERT sequence in an explicit transaction
+    # so partial writes cannot occur if an exception interrupts the loop.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("DELETE FROM flow_memberships")
+        conn.execute("DELETE FROM flows")
 
-    count = 0
-    for flow in flows:
-        path_json = json.dumps(flow.get("path", []))
-        conn.execute(
-            """INSERT INTO flows
-               (name, entry_point_id, depth, node_count, file_count,
-                criticality, path_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                flow["name"],
-                flow["entry_point_id"],
-                flow["depth"],
-                flow["node_count"],
-                flow["file_count"],
-                flow["criticality"],
-                path_json,
-            ),
-        )
-        flow_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-
-        # Insert memberships.
-        node_ids = flow.get("path", [])
-        for position, node_id in enumerate(node_ids):
+        count = 0
+        for flow in flows:
+            path_json = json.dumps(flow.get("path", []))
             conn.execute(
-                "INSERT OR IGNORE INTO flow_memberships (flow_id, node_id, position) "
-                "VALUES (?, ?, ?)",
-                (flow_id, node_id, position),
+                """INSERT INTO flows
+                   (name, entry_point_id, depth, node_count, file_count,
+                    criticality, path_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    flow["name"],
+                    flow["entry_point_id"],
+                    flow["depth"],
+                    flow["node_count"],
+                    flow["file_count"],
+                    flow["criticality"],
+                    path_json,
+                ),
             )
-        count += 1
+            flow_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
-    conn.commit()
+            # Insert memberships.
+            node_ids = flow.get("path", [])
+            for position, node_id in enumerate(node_ids):
+                conn.execute(
+                    "INSERT OR IGNORE INTO flow_memberships (flow_id, node_id, position) "
+                    "VALUES (?, ?, ?)",
+                    (flow_id, node_id, position),
+                )
+            count += 1
+
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
     return count
 
 
@@ -403,10 +490,22 @@ def incremental_trace_flows(
     # ------------------------------------------------------------------
     # 3. Delete affected flows and their memberships
     # ------------------------------------------------------------------
-    for fid in affected_ids:
-        conn.execute("DELETE FROM flow_memberships WHERE flow_id = ?", (fid,))
-        conn.execute("DELETE FROM flows WHERE id = ?", (fid,))
-    conn.commit()
+    # Wrap in an explicit transaction so a crash mid-loop cannot leave
+    # orphaned flow_memberships rows pointing at deleted flows.  See #258.
+    if affected_ids:
+        if conn.in_transaction:
+            conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for fid in affected_ids:
+                conn.execute(
+                    "DELETE FROM flow_memberships WHERE flow_id = ?", (fid,),
+                )
+                conn.execute("DELETE FROM flows WHERE id = ?", (fid,))
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
 
     # ------------------------------------------------------------------
     # 4. Re-detect entry points and filter to relevant ones
@@ -421,10 +520,12 @@ def incremental_trace_flows(
     # 5. BFS-trace each relevant entry point
     # ------------------------------------------------------------------
     new_flows: list[dict] = []
-    for ep in relevant_eps:
-        flow = _trace_single_flow(store, ep, max_depth)
-        if flow is not None:
-            new_flows.append(flow)
+    if relevant_eps:
+        adj = store.load_flow_adjacency()
+        for ep in relevant_eps:
+            flow = _trace_single_flow(adj, ep, max_depth)
+            if flow is not None:
+                new_flows.append(flow)
 
     # ------------------------------------------------------------------
     # 6. INSERT new flows without clearing unrelated ones

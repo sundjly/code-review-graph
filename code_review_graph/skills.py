@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import platform
 import shutil
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 # --- Multi-platform MCP install ---
+
 
 def _zed_settings_path() -> Path:
     """Return the Zed settings.json path for the current OS."""
@@ -27,6 +30,14 @@ def _zed_settings_path() -> Path:
 
 
 PLATFORMS: dict[str, dict[str, Any]] = {
+    "codex": {
+        "name": "Codex",
+        "config_path": lambda root: Path.home() / ".codex" / "config.toml",
+        "key": "mcp_servers",
+        "detect": lambda: (Path.home() / ".codex").exists(),
+        "format": "toml",
+        "needs_type": True,
+    },
     "claude": {
         "name": "Claude Code",
         "config_path": lambda root: root / ".mcp.json",
@@ -83,26 +94,167 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "format": "object",
         "needs_type": False,
     },
+    "qwen": {
+        "name": "Qwen Code",
+        "config_path": lambda root: Path.home() / ".qwen" / "settings.json",
+        "key": "mcpServers",
+        "detect": lambda: (Path.home() / ".qwen").exists(),
+        "format": "object",
+        "needs_type": True,
+    },
+    "kiro": {
+        "name": "Kiro",
+        "config_path": lambda root: root / ".kiro" / "settings" / "mcp.json",
+        "key": "mcpServers",
+        "detect": lambda: (Path.home() / ".kiro").exists(),
+        "format": "object",
+        "needs_type": True,
+    },
+    "qoder": {
+        "name": "Qoder",
+        "config_path": lambda root: root / ".qoder" / "mcp.json",
+        "key": "mcpServers",
+        "detect": lambda: True,
+        "format": "object",
+        "needs_type": True,
+    },
 }
+
+
+def _in_poetry_project() -> bool:
+    """Return True when the running interpreter is a Poetry-managed virtualenv.
+
+    Two signals are checked so that **both** ``poetry shell`` and ``poetry run``
+    are detected:
+
+    * ``POETRY_ACTIVE=1`` — set by ``poetry shell`` when the user activates the
+      virtual environment interactively.
+    * ``VIRTUAL_ENV`` containing ``"pypoetry"`` — set by **both** ``poetry shell``
+      and ``poetry run`` because Poetry stores its virtualenvs under a path that
+      includes the string ``pypoetry`` (e.g.
+      ``~/.cache/pypoetry/virtualenvs/<name>`` on Linux/macOS or
+      ``%LOCALAPPDATA%\\pypoetry\\Cache\\virtualenvs\\<name>`` on Windows).
+
+    Checking only ``POETRY_ACTIVE`` would miss the ``poetry run`` case, which is
+    the primary scenario described in issue #256.
+    """
+    if os.environ.get("POETRY_ACTIVE") == "1":
+        return True
+    virtual_env = os.environ.get("VIRTUAL_ENV", "")
+    return bool(virtual_env) and "pypoetry" in virtual_env.lower()
+
+
+def _in_uv_project() -> bool:
+    """Return True if ``sys.executable`` lives inside a uv-managed project.
+
+    A project is considered uv-managed when a ``uv.lock`` file exists in any
+    ancestor directory of the running Python interpreter (stopping at the home
+    directory to avoid false positives on system-wide installations).
+    """
+    exe = Path(sys.executable).resolve()
+    home = Path.home()
+    for parent in exe.parents:
+        if (parent / "uv.lock").exists():
+            return True
+        # Stop searching once we reach the home directory or filesystem root
+        if parent == home or parent == parent.parent:
+            break
+    return False
+
+
+def _detect_serve_command() -> tuple[str, list[str]]:
+    """Return ``(command, args)`` that correctly launches ``code-review-graph serve``.
+
+    Detection priority
+    ------------------
+    1. **Poetry** – ``POETRY_ACTIVE=1`` OR ``VIRTUAL_ENV`` contains ``"pypoetry"``
+       (covers both ``poetry shell`` and ``poetry run``) and ``poetry`` is on PATH
+       → ``poetry run code-review-graph serve``
+    2. **uv project** – ``UV_PROJECT_ENVIRONMENT`` is set, or a ``uv.lock``
+       ancestor is found alongside ``sys.executable``, and ``uv`` is on PATH
+       → ``uv run code-review-graph serve``
+    3. **uvx** – ``uvx`` is available on PATH (existing behaviour, unchanged)
+       → ``uvx code-review-graph serve``
+    4. **Fallback** – use the absolute path of the running Python interpreter
+       → ``sys.executable -m code_review_graph serve``
+
+    The fallback is always safe: ``sys.executable`` is the exact interpreter
+    that is currently running, so it resolves correctly inside any virtual
+    environment, conda env, or system installation.
+    """
+    # 1. Poetry (poetry shell or poetry run)
+    if _in_poetry_project():
+        poetry = shutil.which("poetry")
+        if poetry:
+            return ("poetry", ["run", "code-review-graph", "serve"])
+
+    # 2. uv managed project environment
+    if os.environ.get("UV_PROJECT_ENVIRONMENT") or _in_uv_project():
+        uv = shutil.which("uv")
+        if uv:
+            return ("uv", ["run", "code-review-graph", "serve"])
+
+    # 3. uvx global tool runner (existing behaviour, unchanged)
+    if shutil.which("uvx"):
+        return ("uvx", ["code-review-graph", "serve"])
+
+    # 4. Absolute-path fallback using the running interpreter
+    return (sys.executable, ["-m", "code_review_graph", "serve"])
 
 
 def _build_server_entry(plat: dict[str, Any], key: str = "") -> dict[str, Any]:
     """Build the MCP server entry for a platform."""
-    if shutil.which("uvx"):
-        entry: dict[str, Any] = {
-            "command": "uvx",
-            "args": ["code-review-graph", "serve"],
-        }
-    else:
-        entry = {
-            "command": "code-review-graph",
-            "args": ["serve"],
-        }
+    command, args = _detect_serve_command()
+    entry: dict[str, Any] = {"command": command, "args": args}
     if plat["needs_type"]:
         entry["type"] = "stdio"
     if key == "opencode":
         entry["env"] = []
     return entry
+
+
+def _format_toml_value(value: Any) -> str:
+    """Format a primitive Python value as TOML."""
+    if isinstance(value, str):
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, list):
+        return "[" + ", ".join(_format_toml_value(item) for item in value) + "]"
+    raise TypeError(f"Unsupported TOML value: {type(value)!r}")
+
+
+def _merge_toml_mcp_server(
+    config_path: Path,
+    server_name: str,
+    server_entry: dict[str, Any],
+    dry_run: bool = False,
+) -> bool:
+    """Append a Codex MCP server section without clobbering the rest of the file."""
+    section_header = f"[mcp_servers.{server_name}]"
+    existing = ""
+    if config_path.exists():
+        existing = config_path.read_text(encoding="utf-8")
+        if section_header in existing:
+            return False
+
+    section_lines = [section_header]
+    for key, value in server_entry.items():
+        section_lines.append(f"{key} = {_format_toml_value(value)}")
+    section = "\n".join(section_lines) + "\n"
+
+    if dry_run:
+        return True
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    prefix = ""
+    if existing:
+        prefix = existing if existing.endswith("\n") else existing + "\n"
+        if not prefix.endswith("\n\n"):
+            prefix += "\n"
+    config_path.write_text(prefix + section, encoding="utf-8")
+    return True
 
 
 def install_platform_configs(
@@ -121,9 +273,10 @@ def install_platform_configs(
         List of platform names that were configured.
     """
     if target == "all":
-        platforms_to_install = {
-            k: v for k, v in PLATFORMS.items() if v["detect"]()
-        }
+        platforms_to_install = {k: v for k, v in PLATFORMS.items() if v["detect"]()}
+        # Workspace-level Kiro detection
+        if "kiro" not in platforms_to_install and (repo_root / ".kiro").is_dir():
+            platforms_to_install["kiro"] = PLATFORMS["kiro"]
     else:
         if target not in PLATFORMS:
             logger.error("Unknown platform: %s", target)
@@ -137,11 +290,29 @@ def install_platform_configs(
         server_key = plat["key"]
         server_entry = _build_server_entry(plat, key=key)
 
+        if plat["format"] == "toml":
+            changed = _merge_toml_mcp_server(
+                config_path,
+                "code-review-graph",
+                server_entry,
+                dry_run=dry_run,
+            )
+            if not changed:
+                print(f"  {plat['name']}: already configured in {config_path}")
+                configured.append(plat["name"])
+                continue
+            if dry_run:
+                print(f"  [dry-run] {plat['name']}: would write {config_path}")
+            else:
+                print(f"  {plat['name']}: configured {config_path}")
+            configured.append(plat["name"])
+            continue
+
         # Read existing config
         existing: dict[str, Any] = {}
         if config_path.exists():
             try:
-                existing = json.loads(config_path.read_text(encoding="utf-8"))
+                existing = json.loads(config_path.read_text(encoding="utf-8", errors="replace"))
             except (json.JSONDecodeError, OSError):
                 logger.warning("Invalid JSON in %s, will overwrite.", config_path)
                 existing = {}
@@ -151,10 +322,7 @@ def install_platform_configs(
             if not isinstance(arr, list):
                 arr = []
             # Check if already present
-            if any(
-                isinstance(s, dict) and s.get("name") == "code-review-graph"
-                for s in arr
-            ):
+            if any(isinstance(s, dict) and s.get("name") == "code-review-graph" for s in arr):
                 print(f"  {plat['name']}: already configured in {config_path}")
                 configured.append(plat["name"])
                 continue
@@ -183,6 +351,7 @@ def install_platform_configs(
 
     return configured
 
+
 # --- Skill file contents ---
 
 _SKILLS: dict[str, dict[str, str]] = {
@@ -206,10 +375,10 @@ _SKILLS: dict[str, dict[str, str]] = {
             "- Use `children_of` on a file to see all its functions and classes.\n"
             "- Use `find_large_functions` to identify complex code.\n\n"
             "## Token Efficiency Rules\n"
-            "- ALWAYS start with `get_minimal_context(task=\"<your task>\")` "
+            '- ALWAYS start with `get_minimal_context(task="<your task>")` '
             "before any other graph tool.\n"
-            "- Use `detail_level=\"minimal\"` on all calls. Only escalate to "
-            "\"standard\" when minimal is insufficient.\n"
+            '- Use `detail_level="minimal"` on all calls. Only escalate to '
+            '"standard" when minimal is insufficient.\n'
             "- Target: complete any review/debug/refactor task in ≤5 tool calls "
             "and ≤800 total output tokens."
         ),
@@ -224,7 +393,7 @@ _SKILLS: dict[str, dict[str, str]] = {
             "1. Run `detect_changes` to get risk-scored change analysis.\n"
             "2. Run `get_affected_flows` to find impacted execution paths.\n"
             "3. For each high-risk function, run `query_graph` with "
-            "pattern=\"tests_for\" to check test coverage.\n"
+            'pattern="tests_for" to check test coverage.\n'
             "4. Run `get_impact_radius` to understand the blast radius.\n"
             "5. For any untested changes, suggest specific test cases.\n\n"
             "### Output Format\n\n"
@@ -234,10 +403,10 @@ _SKILLS: dict[str, dict[str, str]] = {
             "- Suggested improvements\n"
             "- Overall merge recommendation\n\n"
             "## Token Efficiency Rules\n"
-            "- ALWAYS start with `get_minimal_context(task=\"<your task>\")` "
+            '- ALWAYS start with `get_minimal_context(task="<your task>")` '
             "before any other graph tool.\n"
-            "- Use `detail_level=\"minimal\"` on all calls. Only escalate to "
-            "\"standard\" when minimal is insufficient.\n"
+            '- Use `detail_level="minimal"` on all calls. Only escalate to '
+            '"standard" when minimal is insufficient.\n'
             "- Target: complete any review/debug/refactor task in ≤5 tool calls "
             "and ≤800 total output tokens."
         ),
@@ -260,10 +429,10 @@ _SKILLS: dict[str, dict[str, str]] = {
             "- Look at affected flows to find the entry point that triggers the bug.\n"
             "- Recent changes are the most common source of new issues.\n\n"
             "## Token Efficiency Rules\n"
-            "- ALWAYS start with `get_minimal_context(task=\"<your task>\")` "
+            '- ALWAYS start with `get_minimal_context(task="<your task>")` '
             "before any other graph tool.\n"
-            "- Use `detail_level=\"minimal\"` on all calls. Only escalate to "
-            "\"standard\" when minimal is insufficient.\n"
+            '- Use `detail_level="minimal"` on all calls. Only escalate to '
+            '"standard" when minimal is insufficient.\n'
             "- Target: complete any review/debug/refactor task in ≤5 tool calls "
             "and ≤800 total output tokens."
         ),
@@ -275,10 +444,10 @@ _SKILLS: dict[str, dict[str, str]] = {
             "## Refactor Safely\n\n"
             "Use the knowledge graph to plan and execute refactoring with confidence.\n\n"
             "### Steps\n\n"
-            "1. Use `refactor_tool` with mode=\"suggest\" for community-driven "
+            '1. Use `refactor_tool` with mode="suggest" for community-driven '
             "refactoring suggestions.\n"
-            "2. Use `refactor_tool` with mode=\"dead_code\" to find unreferenced code.\n"
-            "3. For renames, use `refactor_tool` with mode=\"rename\" to preview all "
+            '2. Use `refactor_tool` with mode="dead_code" to find unreferenced code.\n'
+            '3. For renames, use `refactor_tool` with mode="rename" to preview all '
             "affected locations.\n"
             "4. Use `apply_refactor_tool` with the refactor_id to apply renames.\n"
             "5. After changes, run `detect_changes` to verify the refactoring impact.\n\n"
@@ -288,10 +457,10 @@ _SKILLS: dict[str, dict[str, str]] = {
             "- Use `get_affected_flows` to ensure no critical paths are broken.\n"
             "- Run `find_large_functions` to identify decomposition targets.\n\n"
             "## Token Efficiency Rules\n"
-            "- ALWAYS start with `get_minimal_context(task=\"<your task>\")` "
+            '- ALWAYS start with `get_minimal_context(task="<your task>")` '
             "before any other graph tool.\n"
-            "- Use `detail_level=\"minimal\"` on all calls. Only escalate to "
-            "\"standard\" when minimal is insufficient.\n"
+            '- Use `detail_level="minimal"` on all calls. Only escalate to '
+            '"standard" when minimal is insufficient.\n'
             "- Target: complete any review/debug/refactor task in ≤5 tool calls "
             "and ≤800 total output tokens."
         ),
@@ -331,62 +500,138 @@ def generate_skills(repo_root: Path, skills_dir: Path | None = None) -> Path:
     return skills_dir
 
 
-def generate_hooks_config() -> dict[str, Any]:
+def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
     """Generate Claude Code hooks configuration.
 
-    Returns a hooks config dict with PostToolUse, SessionStart, and
-    PreCommit hooks for automatic graph updates.
-
-    Returns:
-        Dict with hooks configuration suitable for .claude/settings.json.
+    Hooks use the v1.x+ schema: each entry needs a ``matcher`` and a nested
+    ``hooks`` array. Timeouts are in seconds. ``PreCommit`` is not a valid
+    Claude Code event — pre-commit checks are handled by ``install_git_hook``.
     """
+    repo_arg = json.dumps(repo_root.resolve().as_posix())
     return {
         "hooks": {
             "PostToolUse": [
                 {
                     "matcher": "Edit|Write|Bash",
-                    "command": "code-review-graph update --skip-flows",
-                    "timeout": 5000,
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": (
+                                "git rev-parse --git-dir >/dev/null 2>&1"
+                                f" && code-review-graph update --skip-flows"
+                                f" --repo {repo_arg}"
+                                " || true"
+                            ),
+                            "timeout": 30,
+                        },
+                    ],
                 },
             ],
             "SessionStart": [
                 {
-                    "command": "code-review-graph status",
-                    "timeout": 3000,
-                },
-            ],
-            "PreCommit": [
-                {
-                    "command": "code-review-graph detect-changes --brief",
-                    "timeout": 10000,
+                    "matcher": "",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": (
+                                "git rev-parse --git-dir >/dev/null 2>&1"
+                                f" && code-review-graph status --repo {repo_arg}"
+                                " || echo 'Not a git repo, skipping'"
+                            ),
+                            "timeout": 10,
+                        },
+                    ],
                 },
             ],
         }
     }
 
 
-def install_hooks(repo_root: Path) -> None:
-    """Write hooks config to .claude/settings.json.
+def install_git_hook(repo_root: Path) -> Path | None:
+    """Install a git pre-commit hook that prints a risk summary before each commit.
 
-    Merges with existing settings if present, preserving non-hook
-    configuration.
+    Called automatically by ``code-review-graph install``
+    Creates ``.git/hooks/pre-commit`` if it doesn't exist, or appends to an
+    existing one — preserving any hooks already there. Returns None when no
+    ``.git`` directory is found.
+    """
+    script = """\
+#!/bin/sh
+# Installed by code-review-graph. Remove this file to disable pre-commit graph checks.
+if command -v code-review-graph >/dev/null 2>&1; then
+    code-review-graph update || true
+    code-review-graph detect-changes --brief || true
+fi
+"""
+    marker = "code-review-graph detect-changes"
+
+    git_dir = repo_root / ".git"
+    if not git_dir.is_dir():
+        logger.warning("No .git directory found at %s — skipping git hook install.", repo_root)
+        return None
+
+    hook_path = git_dir / "hooks" / "pre-commit"
+    hook_path.parent.mkdir(exist_ok=True)
+
+    if hook_path.exists():
+        existing = hook_path.read_text(encoding="utf-8")
+        if marker in existing:
+            return hook_path
+        hook_path.write_text(existing.rstrip("\n") + "\n" + script, encoding="utf-8")
+    else:
+        hook_path.write_text(script, encoding="utf-8")
+
+    hook_path.chmod(0o755)
+    logger.info("Wrote git pre-commit hook: %s", hook_path)
+    return hook_path
+
+
+def install_hooks(repo_root: Path, platform: str = "claude") -> None:
+    """Write hooks config to platform-specific settings.json.
+
+    Merges new hook entries into existing settings, preserving both
+    non-hook configuration and user-defined hooks.  A backup of the
+    original file is created before any modifications.
 
     Args:
         repo_root: Repository root directory.
+        platform: Target platform ("claude" or "qoder").
     """
-    settings_dir = repo_root / ".claude"
+    if platform == "qoder":
+        settings_dir = repo_root / ".qoder"
+    else:
+        settings_dir = repo_root / ".claude"
     settings_dir.mkdir(parents=True, exist_ok=True)
     settings_path = settings_dir / "settings.json"
 
     existing: dict[str, Any] = {}
     if settings_path.exists():
         try:
-            existing = json.loads(settings_path.read_text(encoding="utf-8"))
+            existing = json.loads(settings_path.read_text(encoding="utf-8", errors="replace"))
+            backup_path = settings_dir / "settings.json.bak"
+            shutil.copy2(settings_path, backup_path)
+            logger.info("Backed up existing settings to %s", backup_path)
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning("Could not read existing %s: %s", settings_path, exc)
 
-    hooks_config = generate_hooks_config()
-    existing.update(hooks_config)
+    hooks_config = generate_hooks_config(repo_root)
+    existing_hooks = existing.get("hooks", {})
+    if not isinstance(existing_hooks, dict):
+        logger.warning("Existing hooks config is not a dict; replacing with defaults")
+        existing_hooks = {}
+
+    merged_hooks = dict(existing_hooks)
+    for hook_name, hook_entries in hooks_config.get("hooks", {}).items():
+        if isinstance(merged_hooks.get(hook_name), list):
+            merged_list = list(merged_hooks[hook_name])
+            for entry in hook_entries:
+                if entry not in merged_list:
+                    merged_list.append(entry)
+            merged_hooks[hook_name] = merged_list
+        else:
+            merged_hooks[hook_name] = hook_entries
+
+    existing["hooks"] = merged_hooks
 
     settings_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
     logger.info("Wrote hooks config: %s", settings_path)
@@ -416,7 +661,7 @@ Fall back to Grep/Glob/Read **only** when the graph doesn't cover what you need.
 ### Key Tools
 
 | Tool | Use when |
-|------|----------|
+| ------ | ---------- |
 | `detect_changes` | Reviewing code changes — gives risk-scored analysis |
 | `get_review_context` | Need source snippets for review — token-efficient |
 | `get_impact_radius` | Understanding blast radius of a change |
@@ -445,7 +690,7 @@ def _inject_instructions(file_path: Path, marker: str, section: str) -> bool:
     """
     existing = ""
     if file_path.exists():
-        existing = file_path.read_text(encoding="utf-8")
+        existing = file_path.read_text(encoding="utf-8", errors="replace")
 
     if marker in existing:
         logger.info("%s already contains instructions, skipping.", file_path.name)
@@ -453,6 +698,7 @@ def _inject_instructions(file_path: Path, marker: str, section: str) -> bool:
 
     separator = "\n" if existing and not existing.endswith("\n") else ""
     extra_newline = "\n" if existing else ""
+    file_path.parent.mkdir(parents=True, exist_ok=True)
     file_path.write_text(existing + separator + extra_newline + section, encoding="utf-8")
     logger.info("Appended MCP tools section to %s", file_path)
     return True
@@ -461,31 +707,83 @@ def _inject_instructions(file_path: Path, marker: str, section: str) -> bool:
 def inject_claude_md(repo_root: Path) -> None:
     """Append MCP tools section to CLAUDE.md."""
     _inject_instructions(
-        repo_root / "CLAUDE.md", _CLAUDE_MD_SECTION_MARKER, _CLAUDE_MD_SECTION,
+        repo_root / "CLAUDE.md",
+        _CLAUDE_MD_SECTION_MARKER,
+        _CLAUDE_MD_SECTION,
     )
 
 
-# Cross-platform instruction files so every AI coding tool uses the graph.
-_PLATFORM_INSTRUCTION_FILES = {
-    "AGENTS.md": "AGENTS.md",       # Cursor, OpenCode, Antigravity
-    "GEMINI.md": "GEMINI.md",       # Antigravity / Gemini CLI
-    ".cursorrules": ".cursorrules",  # Cursor (legacy, widely used)
-    ".windsurfrules": ".windsurfrules",  # Windsurf
+# Cross-platform instruction files and which platforms own each one.
+# Used to filter writes when the user passes --platform <X>: only files
+# whose owner set includes the target (or "all") are written.
+_PLATFORM_INSTRUCTION_FILES: dict[str, tuple[str, ...]] = {
+    "AGENTS.md": ("cursor", "opencode", "antigravity"),
+    "GEMINI.md": ("antigravity",),
+    ".cursorrules": ("cursor",),
+    ".windsurfrules": ("windsurf",),
+    "QODER.md": ("qoder",),
+    ".kiro/steering/code-review-graph.md": ("kiro",),
 }
 
 
-def inject_platform_instructions(repo_root: Path) -> list[str]:
-    """Inject 'use graph first' instructions into all platform rule files.
+def inject_platform_instructions(repo_root: Path, target: str = "all") -> list[str]:
+    """Inject 'use graph first' instructions into platform rule files.
 
-    Generates AGENTS.md, GEMINI.md, .cursorrules, and .windsurfrules
-    with instructions to prefer code-review-graph MCP tools over
-    manual file scanning.
+    Writes AGENTS.md, GEMINI.md, .cursorrules, and/or .windsurfrules
+    depending on ``target``:
 
-    Returns list of files that were created or updated.
+    - ``"all"`` (default): writes every file — matches pre-filter behavior.
+    - ``"claude"``: writes nothing (CLAUDE.md is handled by ``inject_claude_md``).
+    - any other platform key (``cursor``, ``windsurf``, ``antigravity``,
+      ``opencode``): writes only the files associated with that platform.
+
+    Returns list of filenames that were created or updated.
     """
     updated: list[str] = []
-    for label, filename in _PLATFORM_INSTRUCTION_FILES.items():
+    for filename, owners in _PLATFORM_INSTRUCTION_FILES.items():
+        if target != "all" and target not in owners:
+            continue
         path = repo_root / filename
         if _inject_instructions(path, _CLAUDE_MD_SECTION_MARKER, _CLAUDE_MD_SECTION):
-            updated.append(label)
+            updated.append(filename)
     return updated
+
+
+def install_qoder_skills(repo_root: Path) -> Path | None:
+    """Install skills to Qoder's project-level skills directory.
+
+    Qoder expects skills in .qoder/skills/{skillName}/SKILL.md format within the project.
+    This function copies the project's skills/ directory contents to that location.
+
+    Args:
+        repo_root: Repository root directory (where the skills/ folder is located).
+
+    Returns:
+        Path to the Qoder skills directory, or None if installation failed.
+    """
+    # Qoder skills directory (project-level)
+    qoder_skills_dir = repo_root / ".qoder" / "skills"
+    qoder_skills_dir.mkdir(parents=True, exist_ok=True)
+
+    # Source skills directory in the project
+    source_skills_dir = repo_root / "skills"
+    if not source_skills_dir.exists():
+        logger.warning("No skills/ directory found in %s", repo_root)
+        return None
+
+    installed_count = 0
+    for skill_dir in source_skills_dir.iterdir():
+        if skill_dir.is_dir():
+            skill_file = skill_dir / "SKILL.md"
+            if skill_file.exists():
+                target_dir = qoder_skills_dir / skill_dir.name
+                target_dir.mkdir(parents=True, exist_ok=True)
+                target_file = target_dir / "SKILL.md"
+                target_file.write_text(skill_file.read_text(encoding="utf-8"), encoding="utf-8")
+                logger.info("Installed Qoder skill: %s", skill_dir.name)
+                installed_count += 1
+
+    if installed_count > 0:
+        logger.info("Installed %d skill(s) to %s", installed_count, qoder_skills_dir)
+        return qoder_skills_dir
+    return None

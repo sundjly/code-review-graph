@@ -38,7 +38,7 @@ class Registry:
         """Load registry from disk."""
         if self._path.exists():
             try:
-                data = json.loads(self._path.read_text(encoding="utf-8"))
+                data = json.loads(self._path.read_text(encoding="utf-8", errors="replace"))
                 self._repos = data.get("repos", [])
             except (json.JSONDecodeError, KeyError, TypeError):
                 logger.warning("Invalid registry file, starting fresh: %s", self._path)
@@ -192,11 +192,14 @@ class ConnectionPool:
                 evict_key, evict_conn = self._pool.popitem(last=False)
                 try:
                     evict_conn.close()
-                except Exception:
+                except sqlite3.Error:
                     logger.debug("Failed to close evicted connection: %s", evict_key)
                 logger.debug("Evicted connection: %s", evict_key)
 
-            conn = sqlite3.connect(key, timeout=30, check_same_thread=False)
+            conn = sqlite3.connect(
+                key, timeout=30, check_same_thread=False,
+                isolation_level=None,
+            )
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=5000")
@@ -209,7 +212,7 @@ class ConnectionPool:
             for key, conn in self._pool.items():
                 try:
                     conn.close()
-                except Exception:
+                except sqlite3.Error:
                     logger.debug("Failed to close connection: %s", key)
             self._pool.clear()
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
+import sqlite3
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -118,7 +119,8 @@ def _generate_community_page(store: GraphStore, community: dict[str, Any]) -> st
                 lines.append(f"- *... and {len(community_flows) - 10} more flows.*")
         else:
             lines.append("No execution flows pass through this community.")
-    except Exception:
+    except sqlite3.OperationalError as exc:
+        logger.debug("wiki: flows table unavailable: %s", exc)
         lines.append("Execution flow data not available.")
     lines.append("")
 
@@ -158,7 +160,8 @@ def _generate_community_page(store: GraphStore, community: dict[str, Any]) -> st
         if not outgoing_targets and not incoming_sources:
             lines.append("No cross-community dependencies detected.")
             lines.append("")
-    except Exception:
+    except sqlite3.OperationalError as exc:
+        logger.debug("wiki: dependency edges unavailable: %s", exc)
         lines.append("Dependency data not available.")
         lines.append("")
 
@@ -194,16 +197,31 @@ def generate_wiki(
 
     page_entries: list[tuple[str, str, int]] = []  # (slug, name, size)
 
+    # Track slugs we've already used in THIS run so two communities that
+    # slugify to the same filename don't overwrite each other (#222 follow-up).
+    # Previously "Data Processing" and "data processing" both became
+    # "data-processing.md", causing silent data loss and inflated "updated"
+    # counters (each collision was counted as an update while only one file
+    # made it to disk).
+    used_slugs: set[str] = set()
+
     for comm in communities:
         name = comm["name"]
-        slug = _slugify(name)
+        base_slug = _slugify(name)
+        slug = base_slug
+        suffix = 2
+        while slug in used_slugs:
+            slug = f"{base_slug}-{suffix}"
+            suffix += 1
+        used_slugs.add(slug)
+
         filename = f"{slug}.md"
         filepath = wiki_path / filename
 
         content = _generate_community_page(store, comm)
 
         if filepath.exists() and not force:
-            existing = filepath.read_text(encoding="utf-8")
+            existing = filepath.read_text(encoding="utf-8", errors="replace")
             if existing == content:
                 pages_unchanged += 1
                 page_entries.append((slug, name, comm["size"]))
@@ -239,7 +257,7 @@ def generate_wiki(
     index_path = wiki_path / "index.md"
 
     if index_path.exists() and not force:
-        existing_index = index_path.read_text(encoding="utf-8")
+        existing_index = index_path.read_text(encoding="utf-8", errors="replace")
         if existing_index == index_content:
             pages_unchanged += 1
         else:
@@ -271,17 +289,17 @@ def get_wiki_page(wiki_dir: str | Path, page_name: str) -> str | None:
     filepath = wiki_path / f"{slug}.md"
 
     if filepath.is_file():
-        return filepath.read_text(encoding="utf-8")
+        return filepath.read_text(encoding="utf-8", errors="replace")
 
     # Fallback: try exact filename match — with path traversal protection
     exact_path = (wiki_path / page_name).resolve()
     if exact_path.is_file() and exact_path.is_relative_to(wiki_path.resolve()):
-        return exact_path.read_text(encoding="utf-8")
+        return exact_path.read_text(encoding="utf-8", errors="replace")
 
     # Fallback: search for partial match
     if wiki_path.is_dir():
         for p in wiki_path.iterdir():
             if p.suffix == ".md" and slug in p.stem:
-                return p.read_text(encoding="utf-8")
+                return p.read_text(encoding="utf-8", errors="replace")
 
     return None

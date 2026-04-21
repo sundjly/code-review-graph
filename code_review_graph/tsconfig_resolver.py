@@ -52,7 +52,7 @@ class TsconfigResolver:
                 base_dir = Path(tsconfig_dir).resolve()
 
             return self._match_and_probe(import_str, paths, base_dir)
-        except Exception:
+        except (OSError, ValueError, TypeError):
             logger.debug(
                 "TsconfigResolver: unexpected error for %s", file_path, exc_info=True,
             )
@@ -108,7 +108,7 @@ class TsconfigResolver:
         seen = seen | {canonical}
 
         try:
-            raw = tsconfig_path.read_text(encoding="utf-8")
+            raw = tsconfig_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             logger.debug("TsconfigResolver: cannot read %s", tsconfig_path)
             return {}
