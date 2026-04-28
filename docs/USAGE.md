@@ -102,11 +102,36 @@ Then use `cross_repo_search_tool` to search across all registered repositories.
 
 ## Token Savings
 
+The `code-review-graph` dramatically reduces the amount of context your AI needs to process. 
+
 | Scenario | Without graph | With graph |
 |----------|:---:|:---:|
 | Review 200-file project | ~150k tokens | ~25k tokens |
 | Incremental review | ~150k tokens | ~8k tokens |
 | PR review | ~100k tokens | ~15k tokens |
+
+### Evaluating Token Savings
+
+You can evaluate the exact token savings for your repository against a set of real-world queries by running:
+```bash
+code-review-graph token-savings
+```
+This command runs an automated benchmark simulating common code review tasks. It compares the naive approach (reading all relevant files entirely) against the graph approach (extracting minimal structural context and blast radius).
+
+**Example Output:**
+```text
+Running token savings benchmark...
+Graph loaded. Nodes: 1250, Edges: 4500
+
+--- Benchmark Results ---
+Total Naive Tokens: 185,000
+Total Graph Tokens: 22,500
+Reduction Ratio: 8.22x
+
+Detailed Savings by Query:
+1. What does login() call?: 45,000 -> 3,200 (14.06x)
+2. Files impacted by changes: 140,000 -> 19,300 (7.25x)
+```
 
 ## Supported Languages
 

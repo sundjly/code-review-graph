@@ -261,6 +261,7 @@ code-review-graph daemon remove <path_or_alias>     # Remove a repo from daemon 
 
 # Evaluation
 code-review-graph eval                         # Run evaluation benchmarks
+code-review-graph token-savings                # Evaluate token savings vs naive reading
 
 # Server
 code-review-graph serve                        # Start MCP server (stdio)

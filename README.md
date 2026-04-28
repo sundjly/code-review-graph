@@ -262,6 +262,7 @@ code-review-graph daemon start     # Start multi-repo watch daemon
 code-review-graph daemon stop      # Stop the daemon
 code-review-graph daemon status    # Show daemon status and repos
 code-review-graph eval             # Run evaluation benchmarks
+code-review-graph token-savings    # Evaluate token savings vs naive reading
 code-review-graph serve            # Start MCP server
 ```
 

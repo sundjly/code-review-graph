@@ -196,6 +196,7 @@ code-review-graph register <path>  # 将仓库注册到多仓库注册表
 code-review-graph unregister <id>  # 从注册表移除仓库
 code-review-graph repos            # 列出已注册的仓库
 code-review-graph eval             # 运行评估基准测试
+code-review-graph token-savings    # 评估相对于朴素全量读取节省的 token 数量
 code-review-graph serve            # 启动 MCP 服务器
 ```
 

@@ -507,6 +507,10 @@ def main() -> None:
     eval_cmd.add_argument("--report", action="store_true", help="Generate report from results")
     eval_cmd.add_argument("--output-dir", default=None, help="Output directory for results")
 
+    # token-savings
+    token_cmd = sub.add_parser("token-savings", help="Evaluate token savings (graph vs naive file reading)")
+    token_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+
     # detect-changes
     detect_cmd = sub.add_parser("detect-changes", help="Analyze change impact")
     detect_cmd.add_argument("--base", default="HEAD~1", help="Git diff base (default: HEAD~1)")
@@ -888,6 +892,21 @@ def main() -> None:
             from .postprocessing import run_post_processing
 
             watch(repo_root, store, on_files_updated=run_post_processing)
+
+        elif args.command == "token-savings":
+            from .token_benchmark import run_token_benchmark
+
+            print("Running token reduction benchmark on current repository...")
+            result = run_token_benchmark(store, repo_root)
+
+            print(f"\nNaive corpus tokens: {result['naive_corpus_tokens']}")
+            print(f"Average reduction ratio: {result['average_reduction_ratio']}x")
+            print(f"Summary: {result['summary']}\n")
+
+            print("Per Question Breakdown:")
+            for q_res in result['per_question']:
+                print(f"  - Q: {q_res['question']}")
+                print(f"    Graph Tokens: {q_res['graph_tokens']} | Reduction: {q_res['reduction_ratio']}x\n")
 
         elif args.command == "visualize":
             from .incremental import get_data_dir
