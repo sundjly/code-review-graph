@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>review 工作流对比</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Noto Sans SC", "PingFang SC", sans-serif;
+    background: #f8fafc;
+    padding: 40px;
+    display: flex;
+    justify-content: center;
+  }
+  .wrapper { width: 800px; }
+  .title {
+    font-size: 20px;
+    font-weight: 700;
+    color: #1f2937;
+    text-align: center;
+    margin-bottom: 24px;
+  }
+  .container {
+    display: flex;
+    gap: 20px;
+  }
+  .panel {
+    flex: 1;
+    border-radius: 16px;
+    padding: 28px 24px;
+  }
+  .panel-before {
+    background: #fef2f2;
+    border: 2px solid #fca5a5;
+  }
+  .panel-after {
+    background: #f0fdf4;
+    border: 2px solid #86efac;
+  }
+  .panel-label {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 4px 10px;
+    border-radius: 6px;
+    margin-bottom: 14px;
+  }
+  .panel-before .panel-label { background: #fca5a5; color: #7f1d1d; }
+  .panel-after .panel-label { background: #86efac; color: #14532d; }
+  .panel h3 {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 16px;
+    color: #1f2937;
+  }
+  .panel ul { list-style: none; padding: 0; }
+  .panel li {
+    font-size: 13px;
+    line-height: 1.7;
+    color: #374151;
+    padding: 7px 0 7px 24px;
+    position: relative;
+    border-bottom: 1px solid rgba(0,0,0,0.05);
+  }
+  .panel li:last-child { border-bottom: none; }
+  .panel-before li::before {
+    content: "✕";
+    position: absolute;
+    left: 0;
+    color: #ef4444;
+    font-weight: 700;
+  }
+  .panel-after li::before {
+    content: "✓";
+    position: absolute;
+    left: 0;
+    color: #22c55e;
+    font-weight: 700;
+  }
+  .footer {
+    text-align: center;
+    margin-top: 20px;
+    font-size: 12px;
+    color: #9ca3af;
+  }
+</style>
+</head>
+<body>
+<div class="wrapper">
+  <div class="title">review 工作流对比：传统读文件 vs code-review-graph</div>
+  <div class="container">
+    <div class="panel panel-before">
+      <span class="panel-label">传统方式</span>
+      <h3>每次 review 都在重复劳动</h3>
+      <ul>
+        <li>手动找相关文件，逐个传给 Claude</li>
+        <li>大量无关代码进入上下文窗口</li>
+        <li>每次推导调用关系，结构从头理解</li>
+        <li>不知道影响范围，只能靠经验猜</li>
+        <li>改动越大，context 越乱，越容易遗漏</li>
+        <li>5,000–15,000 tokens / 次，大部分浪费</li>
+      </ul>
+    </div>
+    <div class="panel panel-after">
+      <span class="panel-label">code-review-graph</span>
+      <h3>结构预算好，查询给精华</h3>
+      <ul>
+        <li>get_minimal_context 一句，100 tokens 全局概览</li>
+        <li>detect_changes 精准定位受影响函数和调用链</li>
+        <li>图谱预计算结构关系，查询不需要读文件</li>
+        <li>get_impact_radius BFS 定量扩散范围</li>
+        <li>≤5 次 tool call，工作台始终干净</li>
+        <li>≤800 tokens，节省 90%+，推理更聚焦</li>
+      </ul>
+    </div>
+  </div>
+  <div class="footer">适配 Opus 4.7 批量式交互模式 · 上下文永远精准</div>
+</div>
+</body>
+</html>

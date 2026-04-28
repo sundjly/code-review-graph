@@ -238,6 +238,29 @@ def _migrate_v9(conn: sqlite3.Connection) -> None:
     logger.info("Migration v9: added edge confidence columns")
 
 
+def _migrate_v10(conn: sqlite3.Connection) -> None:
+    """v10: Add flow completeness and analysis metadata columns."""
+    new_cols = [
+        ("is_complete", "INTEGER NOT NULL DEFAULT 1"),
+        ("is_expanded", "INTEGER NOT NULL DEFAULT 1"),
+        ("truncated_reason", "TEXT"),
+        ("analysis_version", "INTEGER NOT NULL DEFAULT 1"),
+        ("explored_nodes", "INTEGER NOT NULL DEFAULT 0"),
+        ("explored_edges", "INTEGER NOT NULL DEFAULT 0"),
+        ("frontier_size", "INTEGER NOT NULL DEFAULT 0"),
+    ]
+    for col, col_def in new_cols:
+        if not _has_column(conn, "flows", col):
+            conn.execute(f"ALTER TABLE flows ADD COLUMN {col} {col_def}")  # noqa: S608
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_flows_is_complete ON flows(is_complete)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_flows_is_expanded ON flows(is_expanded)"
+    )
+    logger.info("Migration v10: added flow completeness/metadata columns")
+
+
 # ---------------------------------------------------------------------------
 # Migration registry
 # ---------------------------------------------------------------------------
@@ -251,6 +274,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     7: _migrate_v7,
     8: _migrate_v8,
     9: _migrate_v9,
+    10: _migrate_v10,
 }
 
 LATEST_VERSION = max(MIGRATIONS.keys())

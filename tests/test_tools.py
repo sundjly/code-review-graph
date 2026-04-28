@@ -500,6 +500,21 @@ class TestFlowTools:
         assert "flow(s) affected" in result["summary"]
         assert "changed_files" in result
 
+    def test_list_flows_no_completeness_warning_when_all_complete(self):
+        """completeness_warning absent when all flows are complete."""
+        result = list_flows(repo_root=str(self.root))
+        assert result["status"] == "ok"
+        assert "completeness_warning" not in result
+
+    def test_get_flow_exposes_is_complete(self):
+        """get_flow result includes is_complete field."""
+        flows_result = list_flows(repo_root=str(self.root))
+        fid = flows_result["flows"][0]["id"]
+        result = get_flow(flow_id=fid, repo_root=str(self.root))
+        assert result["status"] == "ok"
+        assert "is_complete" in result
+        assert isinstance(result["is_complete"], bool)
+
 
 class TestCommunityTools:
     """Tests for community-related MCP tool functions."""

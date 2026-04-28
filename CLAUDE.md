@@ -1,4 +1,8 @@
-# CLAUDE.md - Project Context for Claude Code
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+# Project Context for Claude Code
 
 ## Project Overview
 
@@ -15,15 +19,15 @@ When using code-review-graph MCP tools, follow these rules:
 ## Architecture
 
 - **Core Package**: `code_review_graph/` (Python 3.10+)
-  - `parser.py` — Tree-sitter multi-language AST parser (19 languages including Vue SFC, Solidity, Dart, R, Perl, Lua + Jupyter/Databricks notebooks)
+  - `parser.py` — Tree-sitter multi-language AST parser (23 languages including Vue SFC, Solidity, Dart, R, Perl, Lua, Zig, PowerShell, Julia + Jupyter/Databricks notebooks)
   - `graph.py` — SQLite-backed graph store (nodes, edges, BFS impact analysis)
-  - `tools.py` — 22 MCP tool implementations
-  - `main.py` — FastMCP server entry point (stdio transport), registers 22 tools + 5 prompts
+  - `tools.py` — 30 MCP tool implementations
+  - `main.py` — FastMCP server entry point (stdio transport), registers 30 tools + 5 prompts
   - `incremental.py` — Git-based change detection, file watching
   - `embeddings.py` — Optional vector embeddings (Local sentence-transformers, Google Gemini, MiniMax)
   - `visualization.py` — D3.js interactive HTML graph generator
-  - `cli.py` — CLI entry point (install, build, update, watch, status, visualize, serve, wiki, detect-changes, register, unregister, repos, eval)
-  - `flows.py` — Execution flow detection and criticality scoring
+  - `cli.py` — CLI entry point (install, build, update, watch, status, visualize, serve, wiki, detect-changes, register, unregister, repos, eval); `serve --tools <list>` or `CRG_TOOLS` env var filters exposed MCP tools
+  - `flows.py` — Execution flow detection and criticality scoring; expanded framework decorator patterns (25+); module-scope CALLS edges; in-memory adjacency optimization
   - `communities.py` — Community detection (Leiden algorithm or file-based grouping) and architecture overview
   - `search.py` — FTS5 hybrid search (keyword + vector)
   - `changes.py` — Risk-scored change impact analysis (detect-changes)
@@ -46,7 +50,8 @@ When using code-review-graph MCP tools, follow these rules:
 
 ```bash
 # Development
-uv run pytest tests/ --tb=short -q          # Run tests (572 tests)
+uv run pytest tests/ --tb=short -q          # Run all tests
+uv run pytest tests/test_flows.py -k "test_name" --tb=short  # Run single test
 uv run ruff check code_review_graph/        # Lint
 uv run mypy code_review_graph/ --ignore-missing-imports --no-strict-optional
 
@@ -61,6 +66,10 @@ uv run code-review-graph register <path>    # Register repo in multi-repo regist
 uv run code-review-graph repos              # List registered repos
 uv run code-review-graph eval               # Run evaluation benchmarks
 ```
+
+## File Exclusions
+
+- `.code-review-graphignore` — Works like `.gitignore` to exclude files from graph indexing.
 
 ## Code Conventions
 
@@ -111,8 +120,8 @@ uv run code-review-graph eval               # Run evaluation benchmarks
 
 - **lint**: ruff on Python 3.10
 - **type-check**: mypy
-- **security**: bandit scan
-- **test**: pytest matrix (3.10, 3.11, 3.12, 3.13) with 50% coverage minimum
+- **security**: bandit (skips B101, B404, B603, B607, B608)
+- **test**: pytest matrix (3.10, 3.11, 3.12, 3.13) with 65% coverage minimum
 
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
@@ -193,6 +202,13 @@ Fall back to Grep/Glob/Read **only** when the graph doesn't cover what you need.
 | `semantic_search_nodes` | Finding functions/classes by name or keyword |
 | `get_architecture_overview` | Understanding high-level codebase structure |
 | `refactor_tool` | Planning renames, finding dead code |
+| `apply_refactor_tool` | Apply a previously previewed refactoring |
+| `traverse_graph_tool` | BFS/DFS exploration with token budget |
+| `get_surprising_connections_tool` | Find unexpected cross-community coupling |
+| `get_suggested_questions_tool` | Auto-generate review questions from graph |
+| `get_knowledge_gaps_tool` | Find isolated nodes, untested hotspots |
+| `cross_repo_search_tool` | Search across all registered repositories |
+| `run_postprocess_tool` | Re-run flows/communities/FTS independently |
 
 ### Workflow
 

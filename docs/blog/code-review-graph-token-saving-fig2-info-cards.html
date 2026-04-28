@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>token 用量对比：传统方式 vs 知识图谱</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Noto Sans SC", "PingFang SC", sans-serif;
+    background: #f8fafc;
+    padding: 40px;
+    display: flex;
+    justify-content: center;
+  }
+  .wrapper { width: 800px; }
+  .title {
+    font-size: 20px;
+    font-weight: 700;
+    color: #1f2937;
+    text-align: center;
+    margin-bottom: 28px;
+  }
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+  .card {
+    border-radius: 16px;
+    padding: 28px 20px;
+    text-align: center;
+  }
+  .c1 { background: #fef2f2; border: 2px solid #fca5a5; }
+  .c2 { background: #fef2f2; border: 2px solid #fca5a5; }
+  .c3 { background: #fef2f2; border: 2px solid #fca5a5; }
+  .c4 { background: #f0fdf4; border: 2px solid #86efac; }
+  .c5 { background: #f0fdf4; border: 2px solid #86efac; }
+  .c6 { background: #f0fdf4; border: 2px solid #86efac; }
+  .card-number {
+    font-size: 34px;
+    font-weight: 800;
+    color: #1f2937;
+    line-height: 1;
+    margin-bottom: 8px;
+  }
+  .c1 .card-number, .c2 .card-number, .c3 .card-number { color: #dc2626; }
+  .c4 .card-number, .c5 .card-number, .c6 .card-number { color: #16a34a; }
+  .card-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: #374151;
+    margin-bottom: 6px;
+  }
+  .card-desc {
+    font-size: 11px;
+    color: #6b7280;
+    line-height: 1.5;
+  }
+  .section-label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    text-align: center;
+    margin-bottom: 10px;
+    padding: 4px 12px;
+    border-radius: 6px;
+    display: inline-block;
+  }
+  .section-wrap {
+    text-align: center;
+    margin-bottom: 8px;
+  }
+  .label-bad { background: #fca5a5; color: #7f1d1d; }
+  .label-good { background: #86efac; color: #14532d; }
+  .footer {
+    text-align: center;
+    margin-top: 16px;
+    font-size: 12px;
+    color: #9ca3af;
+  }
+</style>
+</head>
+<body>
+<div class="wrapper">
+  <div class="title">token 用量：传统 review 流程 vs 知识图谱查询</div>
+
+  <div class="section-wrap">
+    <span class="section-label label-bad">传统方式：读文件</span>
+  </div>
+  <div class="cards">
+    <div class="card c1">
+      <div class="card-number">5,000–15,000</div>
+      <div class="card-label">单次 review tokens</div>
+      <div class="card-desc">读相关文件 + 依赖文件内容塞入上下文</div>
+    </div>
+    <div class="card c2">
+      <div class="card-number">60–80%</div>
+      <div class="card-label">无效上下文比例</div>
+      <div class="card-desc">大量没用到的函数、注释、配置占满窗口</div>
+    </div>
+    <div class="card c3">
+      <div class="card-number">每次</div>
+      <div class="card-label">重新推导结构关系</div>
+      <div class="card-desc">代码没变，但 Claude 每次都重新理解调用图</div>
+    </div>
+  </div>
+
+  <div class="section-wrap" style="margin-top:8px">
+    <span class="section-label label-good">知识图谱：查图</span>
+  </div>
+  <div class="cards">
+    <div class="card c4">
+      <div class="card-number">~100</div>
+      <div class="card-label">get_minimal_context tokens</div>
+      <div class="card-desc">风险等级 + 受影响模块 + 推荐下一步</div>
+    </div>
+    <div class="card c5">
+      <div class="card-number">≤800</div>
+      <div class="card-label">完整 review 上下文</div>
+      <div class="card-desc">≤5 次 tool call，结构化精准结论</div>
+    </div>
+    <div class="card c6">
+      <div class="card-number">90%+</div>
+      <div class="card-label">token 节省率</div>
+      <div class="card-desc">图谱预计算结构关系，查询而非读取</div>
+    </div>
+  </div>
+
+  <div class="footer">数据来自 code-review-graph v2.2.1 benchmark 基准测试</div>
+</div>
+</body>
+</html>

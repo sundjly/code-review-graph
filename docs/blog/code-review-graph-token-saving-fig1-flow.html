@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>构建流程：从源码到可查询的知识图谱</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Noto Sans SC", "PingFang SC", sans-serif;
+    background: #f8fafc;
+    padding: 40px;
+    display: flex;
+    justify-content: center;
+  }
+  .wrapper { width: 800px; }
+  .title {
+    font-size: 20px;
+    font-weight: 700;
+    color: #1f2937;
+    text-align: center;
+    margin-bottom: 36px;
+  }
+  .flow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+  }
+  .step {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 148px;
+  }
+  .step-circle {
+    width: 68px;
+    height: 68px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 26px;
+    margin-bottom: 14px;
+  }
+  .s1 .step-circle { background: #eff6ff; border: 2px solid #93c5fd; }
+  .s2 .step-circle { background: #f0fdf4; border: 2px solid #86efac; }
+  .s3 .step-circle { background: #fefce8; border: 2px solid #fde047; }
+  .s4 .step-circle { background: #fdf2f8; border: 2px solid #f9a8d4; }
+  .s5 .step-circle { background: #f5f3ff; border: 2px solid #c4b5fd; }
+  .step-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: #1f2937;
+    text-align: center;
+    margin-bottom: 5px;
+  }
+  .step-desc {
+    font-size: 11px;
+    color: #6b7280;
+    text-align: center;
+    line-height: 1.5;
+  }
+  .arrow {
+    display: flex;
+    align-items: center;
+    padding-bottom: 44px;
+    padding-left: 2px;
+    padding-right: 2px;
+  }
+  .arrow svg {
+    width: 28px;
+    height: 20px;
+  }
+  .footer {
+    text-align: center;
+    margin-top: 28px;
+    font-size: 12px;
+    color: #9ca3af;
+  }
+</style>
+</head>
+<body>
+<div class="wrapper">
+  <div class="title">构建流程：从源码到可查询的知识图谱</div>
+  <div class="flow">
+    <div class="step s1">
+      <div class="step-circle">📁</div>
+      <div class="step-title">源码文件</div>
+      <div class="step-desc">23 种语言<br>git ls-files 收集</div>
+    </div>
+    <div class="arrow">
+      <svg viewBox="0 0 28 20"><path d="M18 3l7 7-7 7M0 10h23" fill="none" stroke="#d1d5db" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+    <div class="step s2">
+      <div class="step-circle">🌳</div>
+      <div class="step-title">Tree-sitter 解析</div>
+      <div class="step-desc">提取 AST<br>识别函数/类/调用</div>
+    </div>
+    <div class="arrow">
+      <svg viewBox="0 0 28 20"><path d="M18 3l7 7-7 7M0 10h23" fill="none" stroke="#d1d5db" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+    <div class="step s3">
+      <div class="step-circle">🔗</div>
+      <div class="step-title">节点与边</div>
+      <div class="step-desc">CALLS / IMPORTS<br>INHERITS / TESTS_FOR</div>
+    </div>
+    <div class="arrow">
+      <svg viewBox="0 0 28 20"><path d="M18 3l7 7-7 7M0 10h23" fill="none" stroke="#d1d5db" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+    <div class="step s4">
+      <div class="step-circle">🗄️</div>
+      <div class="step-title">SQLite 图谱</div>
+      <div class="step-desc">WAL 模式<br>增量 hash 更新</div>
+    </div>
+    <div class="arrow">
+      <svg viewBox="0 0 28 20"><path d="M18 3l7 7-7 7M0 10h23" fill="none" stroke="#d1d5db" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+    <div class="step s5">
+      <div class="step-circle">🔍</div>
+      <div class="step-title">MCP 工具查询</div>
+      <div class="step-desc">24 个工具<br>≤800 tokens / review</div>
+    </div>
+  </div>
+  <div class="footer">全量 build 30–60s · 增量更新 &lt;2s · 100% 本地运行</div>
+</div>
+</body>
+</html>

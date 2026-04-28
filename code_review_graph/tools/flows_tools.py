@@ -67,11 +67,17 @@ def list_flows(
                 for f in flows
             ]
 
+        incomplete_count = sum(1 for f in flows if not f.get("is_complete", True))
         result: dict[str, object] = {
             "status": "ok",
             "summary": f"Found {len(flows)} execution flow(s)",
             "flows": flows,
         }
+        if incomplete_count > 0:
+            result["completeness_warning"] = (
+                f"{incomplete_count} flow(s) were truncated during analysis. "
+                "Use get_flow() on individual flows to see truncation details."
+            )
         result["_hints"] = generate_hints(
             "list_flows", result, get_session()
         )
@@ -165,6 +171,8 @@ def get_flow(
                 f"criticality {flow['criticality']:.4f}"
             ),
             "flow": flow,
+            "is_complete": flow.get("is_complete", True),
+            "truncated_reason": flow.get("truncated_reason"),
         }
         result["_hints"] = generate_hints(
             "get_flow", result, get_session()

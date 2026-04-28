@@ -142,6 +142,32 @@ class TestMigrations:
         assert "idx_edges_target_kind" in indexes
         assert "idx_edges_source_kind" in indexes
 
+    def test_v10_adds_completeness_columns(self):
+        """v10 adds 7 completeness/metadata columns to the flows table."""
+        cursor = self.store._conn.execute("PRAGMA table_info(flows)")
+        columns = {row[1] if isinstance(row, tuple) else row["name"] for row in cursor}
+        expected = {
+            "is_complete", "is_expanded", "truncated_reason",
+            "analysis_version", "explored_nodes", "explored_edges", "frontier_size",
+        }
+        assert expected <= columns
+
+    def test_v10_adds_completeness_indexes(self):
+        """v10 adds is_complete and is_expanded indexes on flows."""
+        rows = self.store._conn.execute("PRAGMA index_list(flows)").fetchall()
+        indexes = {row[1] if isinstance(row, tuple) else row["name"] for row in rows}
+        assert "idx_flows_is_complete" in indexes
+        assert "idx_flows_is_expanded" in indexes
+
+    def test_v10_migration_idempotent(self):
+        """Running v10 migration twice does not fail."""
+        from code_review_graph.migrations import _migrate_v10
+        _migrate_v10(self.store._conn)
+        _migrate_v10(self.store._conn)
+        cursor = self.store._conn.execute("PRAGMA table_info(flows)")
+        columns = {row[1] if isinstance(row, tuple) else row["name"] for row in cursor}
+        assert "is_complete" in columns
+
 
 def _get_table_names(conn: sqlite3.Connection) -> set[str]:
     """Helper: return all table/view names in the database."""

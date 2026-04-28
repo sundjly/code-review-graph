@@ -12,6 +12,7 @@ import json
 import logging
 import re
 from collections import deque
+from dataclasses import dataclass
 from typing import Optional
 
 from .constants import SECURITY_KEYWORDS as _SECURITY_KEYWORDS
@@ -141,6 +142,31 @@ _TEST_FILE_RE = re.compile(
     r"([\\/]__tests__[\\/]|\.spec\.[jt]sx?$|\.test\.[jt]sx?$|[\\/]test_[^/\\]*\.py$)",
 )
 
+# Performance limits for large codebases.
+_MAX_ENTRY_POINTS = 3000
+_MAX_FLOW_NODES = 500
+
+
+@dataclass
+class FlowBudget:
+    """Controls BFS expansion limits for flow tracing.
+
+    When a budget limit is hit, the flow is marked ``is_complete=False``
+    with a ``truncated_reason`` instead of silently discarding nodes.
+    """
+    max_nodes: int = _MAX_FLOW_NODES
+    max_depth: int = 15
+    max_entry_points: int = _MAX_ENTRY_POINTS
+
+    @classmethod
+    def default(cls) -> "FlowBudget":
+        return cls()
+
+    @classmethod
+    def large_repo(cls) -> "FlowBudget":
+        """Budget tuned for 200k+ node repos — wider entry-point cap."""
+        return cls(max_nodes=_MAX_FLOW_NODES, max_depth=12, max_entry_points=5000)
+
 
 def _is_test_file(file_path: str) -> bool:
     """Return True if *file_path* looks like a test file."""
@@ -150,6 +176,7 @@ def _is_test_file(file_path: str) -> bool:
 def detect_entry_points(
     store: GraphStore,
     include_tests: bool = False,
+    budget: FlowBudget | None = None,
 ) -> list[GraphNode]:
     """Find functions that are entry points in the graph.
 
@@ -170,30 +197,45 @@ def detect_entry_points(
     # Scan all nodes for entry-point candidates.
     candidate_nodes = store.get_nodes_by_kind(["Function", "Test"])
 
-    entry_points: list[GraphNode] = []
+    # Bucket by priority: decorator > conventional name > true root.
+    # True-root bucket can be enormous in large codebases; by keeping it last
+    # and applying _MAX_ENTRY_POINTS we avoid collecting tens-of-thousands of
+    # entry points that would make trace_flows hang.
+    bucket_decorator: list[GraphNode] = []
+    bucket_name: list[GraphNode] = []
+    bucket_root: list[GraphNode] = []
     seen_qn: set[str] = set()
 
     for node in candidate_nodes:
         if not include_tests and (node.is_test or _is_test_file(node.file_path)):
             continue
 
-        is_entry = False
+        if node.qualified_name in seen_qn:
+            continue
 
-        # True root: no one calls this function.
-        if node.qualified_name not in called_qnames:
-            is_entry = True
+        has_decorator = _has_framework_decorator(node)
+        has_entry_name = _matches_entry_name(node)
+        is_true_root = node.qualified_name not in called_qnames
 
-        # Framework decorator match.
-        if _has_framework_decorator(node):
-            is_entry = True
-
-        # Conventional name match.
-        if _matches_entry_name(node):
-            is_entry = True
-
-        if is_entry and node.qualified_name not in seen_qn:
-            entry_points.append(node)
+        if has_decorator:
+            bucket_decorator.append(node)
             seen_qn.add(node.qualified_name)
+        elif has_entry_name:
+            bucket_name.append(node)
+            seen_qn.add(node.qualified_name)
+        elif is_true_root:
+            bucket_root.append(node)
+            seen_qn.add(node.qualified_name)
+
+    entry_points = bucket_decorator + bucket_name + bucket_root
+    max_eps = budget.max_entry_points if budget is not None else _MAX_ENTRY_POINTS
+    if len(entry_points) > max_eps:
+        logger.warning(
+            "detect_entry_points: capping %d entry points to %d for performance",
+            len(entry_points),
+            max_eps,
+        )
+        entry_points = entry_points[:max_eps]
 
     return entry_points
 
@@ -206,19 +248,28 @@ def detect_entry_points(
 def _trace_single_flow(
     adj: FlowAdjacency,
     ep: GraphNode,
-    max_depth: int = 15,
+    budget: FlowBudget | None = None,
 ) -> Optional[dict]:
     """Trace a single execution flow from *ep* via forward BFS.
 
     Returns a flow dict (see :func:`trace_flows` for the schema) or ``None``
     if the flow is trivial (single-node, no outgoing CALLS that resolve).
+
+    When a budget limit is exceeded, the flow is still returned but with
+    ``is_complete=False`` and a ``truncated_reason`` string instead of
+    silently discarding nodes.
     """
+    if budget is None:
+        budget = FlowBudget.default()
+
     path_ids: list[int] = [ep.id]
     path_qnames: list[str] = [ep.qualified_name]
     visited: set[str] = {ep.qualified_name}
     queue: deque[tuple[str, int]] = deque([(ep.qualified_name, 0)])
 
     actual_depth = 0
+    explored_edges = 0
+    depth_truncated = False
     nodes_by_qn = adj.nodes_by_qn
     calls_out = adj.calls_out
 
@@ -226,12 +277,22 @@ def _trace_single_flow(
         current_qn, depth = queue.popleft()
         if depth > actual_depth:
             actual_depth = depth
-        if depth >= max_depth:
+        if depth >= budget.max_depth:
+            # Record whether this node had unvisited callees we're skipping.
+            if not depth_truncated:
+                for tqn in calls_out.get(current_qn, ()):
+                    if tqn not in visited and nodes_by_qn.get(tqn) is not None:
+                        depth_truncated = True
+                        break
             continue
-
+        node_limit_hit = False
         for target_qn in calls_out.get(current_qn, ()):
+            explored_edges += 1
             if target_qn in visited:
                 continue
+            if len(path_ids) >= budget.max_nodes:
+                node_limit_hit = True
+                break
             target_node = nodes_by_qn.get(target_qn)
             if target_node is None:
                 continue
@@ -240,6 +301,8 @@ def _trace_single_flow(
             path_qnames.append(target_qn)
             queue.append((target_qn, depth + 1))
 
+        if node_limit_hit:
+            break
     # Skip trivial single-node flows.
     if len(path_ids) < 2:
         return None
@@ -249,6 +312,15 @@ def _trace_single_flow(
         for qn in path_qnames
         if (n := nodes_by_qn.get(qn)) is not None
     })
+
+    # Determine completeness.
+    frontier_size = len(queue)
+    truncated_reason: str | None = None
+    if len(path_ids) >= budget.max_nodes:
+        truncated_reason = f"node_limit:{budget.max_nodes}"
+    elif depth_truncated:
+        truncated_reason = f"depth_limit:{budget.max_depth}"
+    is_complete = truncated_reason is None
 
     flow: dict = {
         "name": _sanitize_name(ep.name),
@@ -260,6 +332,13 @@ def _trace_single_flow(
         "file_count": len(files),
         "files": files,
         "criticality": 0.0,
+        "is_complete": is_complete,
+        "is_expanded": True,
+        "truncated_reason": truncated_reason,
+        "analysis_version": 1,
+        "explored_nodes": len(path_ids),
+        "explored_edges": explored_edges,
+        "frontier_size": frontier_size,
     }
     flow["criticality"] = compute_criticality(flow, adj)
     return flow
@@ -269,6 +348,7 @@ def trace_flows(
     store: GraphStore,
     max_depth: int = 15,
     include_tests: bool = False,
+    budget: FlowBudget | None = None,
 ) -> list[dict]:
     """Trace execution flows from every entry point via forward BFS.
 
@@ -282,8 +362,12 @@ def trace_flows(
       - file_count: number of distinct files touched
       - files: list of distinct file paths
       - criticality: computed criticality score (0.0-1.0)
+      - is_complete: False when a budget limit was hit during BFS
+      - truncated_reason: describes which limit was hit (or None)
     """
-    entry_points = detect_entry_points(store, include_tests=include_tests)
+    if budget is None:
+        budget = FlowBudget(max_depth=max_depth)
+    entry_points = detect_entry_points(store, include_tests=include_tests, budget=budget)
     if not entry_points:
         return []
 
@@ -291,7 +375,7 @@ def trace_flows(
     flows: list[dict] = []
 
     for ep in entry_points:
-        flow = _trace_single_flow(adj, ep, max_depth)
+        flow = _trace_single_flow(adj, ep, budget)
         if flow is not None:
             flows.append(flow)
 
@@ -408,8 +492,10 @@ def store_flows(store: GraphStore, flows: list[dict]) -> int:
             conn.execute(
                 """INSERT INTO flows
                    (name, entry_point_id, depth, node_count, file_count,
-                    criticality, path_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    criticality, path_json,
+                    is_complete, is_expanded, truncated_reason, analysis_version,
+                    explored_nodes, explored_edges, frontier_size)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     flow["name"],
                     flow["entry_point_id"],
@@ -418,11 +504,18 @@ def store_flows(store: GraphStore, flows: list[dict]) -> int:
                     flow["file_count"],
                     flow["criticality"],
                     path_json,
+                    int(flow.get("is_complete", True)),
+                    int(flow.get("is_expanded", True)),
+                    flow.get("truncated_reason"),
+                    flow.get("analysis_version", 1),
+                    flow.get("explored_nodes", 0),
+                    flow.get("explored_edges", 0),
+                    flow.get("frontier_size", 0),
                 ),
             )
             flow_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
-            # Insert memberships.
+            # Insert memberships only for expanded flows.
             node_ids = flow.get("path", [])
             for position, node_id in enumerate(node_ids):
                 conn.execute(
@@ -510,7 +603,8 @@ def incremental_trace_flows(
     # ------------------------------------------------------------------
     # 4. Re-detect entry points and filter to relevant ones
     # ------------------------------------------------------------------
-    entry_points = detect_entry_points(store)
+    budget = FlowBudget(max_depth=max_depth)
+    entry_points = detect_entry_points(store, budget=budget)
     relevant_eps = [
         ep for ep in entry_points
         if ep.file_path in changed_file_set or ep.id in entry_point_ids
@@ -523,7 +617,7 @@ def incremental_trace_flows(
     if relevant_eps:
         adj = store.load_flow_adjacency()
         for ep in relevant_eps:
-            flow = _trace_single_flow(adj, ep, max_depth)
+            flow = _trace_single_flow(adj, ep, budget)
             if flow is not None:
                 new_flows.append(flow)
 
@@ -536,8 +630,10 @@ def incremental_trace_flows(
         conn.execute(
             """INSERT INTO flows
                (name, entry_point_id, depth, node_count, file_count,
-                criticality, path_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                criticality, path_json,
+                is_complete, is_expanded, truncated_reason, analysis_version,
+                explored_nodes, explored_edges, frontier_size)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 flow["name"],
                 flow["entry_point_id"],
@@ -546,6 +642,13 @@ def incremental_trace_flows(
                 flow["file_count"],
                 flow["criticality"],
                 path_json,
+                int(flow.get("is_complete", True)),
+                int(flow.get("is_expanded", True)),
+                flow.get("truncated_reason"),
+                flow.get("analysis_version", 1),
+                flow.get("explored_nodes", 0),
+                flow.get("explored_edges", 0),
+                flow.get("frontier_size", 0),
             ),
         )
         flow_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -593,9 +696,11 @@ def get_flows(
         (limit,),
     ).fetchall()
 
+    _desc = store._conn.execute("SELECT * FROM flows LIMIT 0").description or []
+    col_names = {desc[0] for desc in _desc}
     results: list[dict] = []
     for row in rows:
-        results.append({
+        entry: dict = {
             "id": row["id"],
             "name": _sanitize_name(row["name"]),
             "entry_point_id": row["entry_point_id"],
@@ -606,7 +711,12 @@ def get_flows(
             "path": json.loads(row["path_json"]),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
-        })
+        }
+        if "is_complete" in col_names:
+            entry["is_complete"] = bool(row["is_complete"])
+            entry["is_expanded"] = bool(row["is_expanded"])
+            entry["truncated_reason"] = row["truncated_reason"]
+        results.append(entry)
     return results
 
 
@@ -640,7 +750,9 @@ def get_flow_by_id(store: GraphStore, flow_id: int) -> Optional[dict]:
                 "qualified_name": _sanitize_name(node.qualified_name),
             })
 
-    return {
+    _desc = store._conn.execute("SELECT * FROM flows LIMIT 0").description or []
+    col_names = {desc[0] for desc in _desc}
+    result: dict = {
         "id": row["id"],
         "name": _sanitize_name(row["name"]),
         "entry_point_id": row["entry_point_id"],
@@ -653,6 +765,11 @@ def get_flow_by_id(store: GraphStore, flow_id: int) -> Optional[dict]:
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+    if "is_complete" in col_names:
+        result["is_complete"] = bool(row["is_complete"])
+        result["is_expanded"] = bool(row["is_expanded"])
+        result["truncated_reason"] = row["truncated_reason"]
+    return result
 
 
 def get_affected_flows(

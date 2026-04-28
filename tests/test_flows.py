@@ -4,6 +4,8 @@ import tempfile
 from pathlib import Path
 
 from code_review_graph.flows import (
+    FlowBudget,
+    _trace_single_flow,
     detect_entry_points,
     get_affected_flows,
     get_flow_by_id,
@@ -610,3 +612,147 @@ class TestFlows:
             "WHERE f.id IS NULL"
         ).fetchall()
         assert len(orphans) == 0, f"found {len(orphans)} orphaned memberships"
+
+
+# ---------------------------------------------------------------------------
+# PR 1: FlowBudget + completeness metadata tests
+# ---------------------------------------------------------------------------
+
+
+class TestFlowBudget:
+    def test_flow_budget_defaults(self):
+        b = FlowBudget.default()
+        assert b.max_nodes == 500
+        assert b.max_depth == 15
+        assert b.max_entry_points == 3000
+
+    def test_flow_budget_large_repo(self):
+        b = FlowBudget.large_repo()
+        assert b.max_entry_points > FlowBudget.default().max_entry_points
+
+    def test_flow_budget_custom(self):
+        b = FlowBudget(max_nodes=10, max_depth=5, max_entry_points=100)
+        assert b.max_nodes == 10
+        assert b.max_depth == 5
+        assert b.max_entry_points == 100
+
+
+class TestFlowCompletenessMetadata:
+    def setup_method(self):
+        import tempfile
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.store = GraphStore(self.tmp.name)
+
+    def teardown_method(self):
+        self.store.close()
+        Path(self.tmp.name).unlink(missing_ok=True)
+
+    def _add_func(self, name, path="app.py", extra=None):
+        node = NodeInfo(
+            kind="Function", name=name, file_path=path,
+            line_start=1, line_end=10, language="python",
+            extra=extra or {},
+        )
+        nid = self.store.upsert_node(node, file_hash="abc")
+        self.store.commit()
+        return nid
+
+    def _add_call(self, src, tgt, path="app.py"):
+        edge = EdgeInfo(kind="CALLS", source=src, target=tgt, file_path=path, line=5)
+        self.store.upsert_edge(edge)
+        self.store.commit()
+
+    def test_trace_single_flow_node_limit_sets_is_complete_false(self):
+        """BFS hitting max_nodes returns is_complete=False with truncated_reason."""
+        # Build a chain of 10 nodes; use budget max_nodes=3 so it truncates.
+        funcs = [f"f{i}" for i in range(10)]
+        for name in funcs:
+            self._add_func(name)
+        for i in range(9):
+            self._add_call(f"app.py::{funcs[i]}", f"app.py::{funcs[i+1]}")
+
+        adj = self.store.load_flow_adjacency()
+        ep = adj.nodes_by_qn["app.py::f0"]
+        budget = FlowBudget(max_nodes=3, max_depth=20)
+        flow = _trace_single_flow(adj, ep, budget)
+
+        assert flow is not None
+        assert flow["is_complete"] is False
+        assert flow["truncated_reason"] is not None
+        assert "node_limit" in flow["truncated_reason"]
+
+    def test_trace_single_flow_depth_limit_sets_is_complete_false(self):
+        """BFS hitting max_depth with nodes remaining returns is_complete=False."""
+        funcs = [f"d{i}" for i in range(6)]
+        for name in funcs:
+            self._add_func(name)
+        for i in range(5):
+            self._add_call(f"app.py::{funcs[i]}", f"app.py::{funcs[i+1]}")
+
+        adj = self.store.load_flow_adjacency()
+        ep = adj.nodes_by_qn["app.py::d0"]
+        budget = FlowBudget(max_nodes=500, max_depth=2)
+        flow = _trace_single_flow(adj, ep, budget)
+
+        assert flow is not None
+        assert flow["is_complete"] is False
+        assert "depth_limit" in flow["truncated_reason"]
+
+    def test_trace_single_flow_complete_sets_is_complete_true(self):
+        """A fully explored flow has is_complete=True."""
+        self._add_func("entry")
+        self._add_func("leaf")
+        self._add_call("app.py::entry", "app.py::leaf")
+
+        adj = self.store.load_flow_adjacency()
+        ep = adj.nodes_by_qn["app.py::entry"]
+        flow = _trace_single_flow(adj, ep, FlowBudget.default())
+
+        assert flow is not None
+        assert flow["is_complete"] is True
+        assert flow["truncated_reason"] is None
+
+    def test_store_flows_persists_is_complete(self):
+        """store_flows writes is_complete; get_flows reads it back."""
+        self._add_func("ep")
+        self._add_func("callee")
+        self._add_call("app.py::ep", "app.py::callee")
+
+        flows = trace_flows(self.store)
+        store_flows(self.store, flows)
+
+        retrieved = get_flows(self.store)
+        assert len(retrieved) >= 1
+        assert "is_complete" in retrieved[0]
+        assert isinstance(retrieved[0]["is_complete"], bool)
+
+    def test_store_flows_persists_truncated_reason(self):
+        """A truncated flow's reason is stored and retrieved correctly."""
+        funcs = [f"t{i}" for i in range(8)]
+        for name in funcs:
+            self._add_func(name)
+        for i in range(7):
+            self._add_call(f"app.py::{funcs[i]}", f"app.py::{funcs[i+1]}")
+
+        budget = FlowBudget(max_nodes=3, max_depth=20)
+        flows = trace_flows(self.store, budget=budget)
+        store_flows(self.store, flows)
+
+        retrieved = get_flows(self.store)
+        truncated = [f for f in retrieved if not f.get("is_complete", True)]
+        assert len(truncated) >= 1
+        assert truncated[0]["truncated_reason"] is not None
+
+    def test_get_flow_by_id_includes_completeness(self):
+        """get_flow_by_id returns is_complete and truncated_reason."""
+        self._add_func("ep")
+        self._add_func("step")
+        self._add_call("app.py::ep", "app.py::step")
+
+        flows = trace_flows(self.store)
+        store_flows(self.store, flows)
+
+        stored = get_flows(self.store)
+        detail = get_flow_by_id(self.store, stored[0]["id"])
+        assert detail is not None
+        assert "is_complete" in detail
